@@ -1,40 +1,116 @@
 package it.unitn.ds;
 
 import akka.actor.ActorRef;
+import akka.actor.Cancellable;
 import akka.actor.Props;
+import scala.concurrent.duration.Duration;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 public class Client extends AbstractClient {
 
-    Client(long readTimeoutDelay, long writeTimeoutDelay, Optional<ActorRef> defaultTargetReplica, Optional<ActorRef> listener) {
+    private final Map<Integer, Cancellable> pendingReadTimers = new HashMap<>();
+    private final Map<Integer, Cancellable> pendingWriteTimers = new HashMap<>();
+    private final Map<Integer, ActorRef> pendingReadReplicas = new HashMap<>();
+    private final Map<Integer, ActorRef> pendingWriteReplicas = new HashMap<>();
+    private final Map<Integer, Integer> pendingWriteValues = new HashMap<>();
+
+    Client(long readTimeoutDelay, long writeTimeoutDelay,
+           Optional<ActorRef> defaultTargetReplica, Optional<ActorRef> listener) {
         super(readTimeoutDelay, writeTimeoutDelay, listener, defaultTargetReplica);
     }
 
-    public static Props props(long readTimeoutDelay, long writeTimeoutDelay, Optional<ActorRef> defaultTargetReplica) {
-        return Props.create(Client.class, () -> new Client(readTimeoutDelay, writeTimeoutDelay, defaultTargetReplica, Optional.empty()));
+    public static Props props(long readTimeoutDelay, long writeTimeoutDelay,
+                              Optional<ActorRef> defaultTargetReplica) {
+        return Props.create(Client.class,
+                () -> new Client(readTimeoutDelay, writeTimeoutDelay, defaultTargetReplica, Optional.empty()));
     }
 
-    // Props method for automated tests
-    public static Props propsWithListener(long readTimeoutDelay, long writeTimeoutDelay, Optional<ActorRef> defaultTargetReplica, ActorRef listener) {
-        return Props.create(Client.class, () -> new Client(readTimeoutDelay, writeTimeoutDelay, defaultTargetReplica, Optional.ofNullable(listener)));
+    public static Props propsWithListener(long readTimeoutDelay, long writeTimeoutDelay,
+                                          Optional<ActorRef> defaultTargetReplica, ActorRef listener) {
+        return Props.create(Client.class,
+                () -> new Client(readTimeoutDelay, writeTimeoutDelay, defaultTargetReplica, Optional.ofNullable(listener)));
     }
+
+    // =========================================================================
+    // Send methods
+    // =========================================================================
 
     @Override
     public void sendRead(ActorRef replica, int index) {
-        // TODO: implement        
+        replica.tell(new Replica.Read(index), getSelf());
+        pendingReadReplicas.put(index, replica);
+        cancel(pendingReadTimers.remove(index));
+        Cancellable t = getContext().system().scheduler().scheduleOnce(
+                Duration.create(getReadTimeoutDelay(), TimeUnit.MILLISECONDS),
+                getSelf(),
+                new AbstractClient.ReadTimeout(getSelf(), replica, index),
+                getContext().dispatcher(),
+                ActorRef.noSender());
+        pendingReadTimers.put(index, t);
     }
 
     @Override
     public void sendWrite(ActorRef replica, int index, int value) {
-        // TODO: implement
+        replica.tell(new Replica.Write(index, value), getSelf());
+        pendingWriteReplicas.put(index, replica);
+        pendingWriteValues.put(index, value);
+        cancel(pendingWriteTimers.remove(index));
+        Cancellable t = getContext().system().scheduler().scheduleOnce(
+                Duration.create(getWriteTimeoutDelay(), TimeUnit.MILLISECONDS),
+                getSelf(),
+                new AbstractClient.WriteTimeout(getSelf(), replica, index, value),
+                getContext().dispatcher(),
+                ActorRef.noSender());
+        pendingWriteTimers.put(index, t);
     }
+
+    // =========================================================================
+    // Receive
+    // =========================================================================
 
     @Override
     public final Receive createReceive() {
         return createBaseReceiveBuilder()
-                // TODO add your message handlers here .match(, )
+                .match(Replica.ReadResponse.class, this::onReadResponse)
+                .match(Replica.WriteResponse.class, this::onWriteResponse)
+                .match(AbstractClient.ReadTimeout.class, this::onReadTimeout)
+                .match(AbstractClient.WriteTimeout.class, this::onWriteTimeout)
                 .build();
     }
 
+    private void onReadResponse(Replica.ReadResponse msg) {
+        cancel(pendingReadTimers.remove(msg.index));
+        pendingReadReplicas.remove(msg.index);
+        callbackOnReadResult(new ReadResult(true, msg.index, msg.value, msg.replicaId));
+    }
+
+    private void onWriteResponse(Replica.WriteResponse msg) {
+        cancel(pendingWriteTimers.remove(msg.index));
+        pendingWriteReplicas.remove(msg.index);
+        pendingWriteValues.remove(msg.index);
+        callbackOnWriteResult(new WriteResult(msg.success, msg.index, msg.value, msg.replicaId));
+    }
+
+    private void onReadTimeout(AbstractClient.ReadTimeout msg) {
+        if (!pendingReadTimers.containsKey(msg.index)) return;
+        pendingReadTimers.remove(msg.index);
+        pendingReadReplicas.remove(msg.index);
+        callbackOnReadTimeout(msg);
+    }
+
+    private void onWriteTimeout(AbstractClient.WriteTimeout msg) {
+        if (!pendingWriteTimers.containsKey(msg.index)) return;
+        pendingWriteTimers.remove(msg.index);
+        pendingWriteReplicas.remove(msg.index);
+        pendingWriteValues.remove(msg.index);
+        callbackOnWriteTimeout(msg);
+    }
+
+    private void cancel(Cancellable c) {
+        if (c != null && !c.isCancelled()) c.cancel();
+    }
 }
