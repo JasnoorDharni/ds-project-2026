@@ -43,7 +43,7 @@ public class Client extends AbstractClient {
     public void sendRead(ActorRef replica, int index) {
         replica.tell(new Replica.Read(index), getSelf());
         pendingReadReplicas.put(index, replica);
-        cancel(pendingReadTimers.remove(index));
+        cancel(pendingReadTimers.remove(index)); // cancel any stale timer if client retries the same index
         Cancellable t = getContext().system().scheduler().scheduleOnce(
                 Duration.create(getReadTimeoutDelay(), TimeUnit.MILLISECONDS),
                 getSelf(),
@@ -58,7 +58,7 @@ public class Client extends AbstractClient {
         replica.tell(new Replica.Write(index, value), getSelf());
         pendingWriteReplicas.put(index, replica);
         pendingWriteValues.put(index, value);
-        cancel(pendingWriteTimers.remove(index));
+        cancel(pendingWriteTimers.remove(index)); // cancel any stale timer if client retries the same index
         Cancellable t = getContext().system().scheduler().scheduleOnce(
                 Duration.create(getWriteTimeoutDelay(), TimeUnit.MILLISECONDS),
                 getSelf(),
@@ -96,14 +96,14 @@ public class Client extends AbstractClient {
     }
 
     private void onReadTimeout(AbstractClient.ReadTimeout msg) {
-        if (!pendingReadTimers.containsKey(msg.index)) return;
+        if (!pendingReadTimers.containsKey(msg.index)) return; // response already arrived; discard stale timeout
         pendingReadTimers.remove(msg.index);
         pendingReadReplicas.remove(msg.index);
         callbackOnReadTimeout(msg);
     }
 
     private void onWriteTimeout(AbstractClient.WriteTimeout msg) {
-        if (!pendingWriteTimers.containsKey(msg.index)) return;
+        if (!pendingWriteTimers.containsKey(msg.index)) return; // response already arrived; discard stale timeout
         pendingWriteTimers.remove(msg.index);
         pendingWriteReplicas.remove(msg.index);
         pendingWriteValues.remove(msg.index);

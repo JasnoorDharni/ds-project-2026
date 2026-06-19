@@ -215,6 +215,7 @@ public class Replica extends AbstractReplica {
         } else {
             pendingCrashType = how.type;
             pendingCrashCount = how.after_n_messages_of_type;
+            // after_n=0 means "crash immediately on next message of that type"; handle it like Now
             if (pendingCrashCount <= 0) {
                 pendingCrashType = null;
                 applyCrashNow();
@@ -276,10 +277,11 @@ public class Replica extends AbstractReplica {
         long k = key(currentEpoch, seqNum);
         pendingUpdates.put(k, update);
         Set<Integer> acks = new HashSet<>();
-        acks.add(id);
+        acks.add(id); // coordinator self-ACKs; also covers the N=1 single-replica case
         pendingAcks.put(k, acks);
         broadcastToOthers(update);
         if (acks.size() >= quorum()) {
+            // quorum already met (single replica): commit immediately without waiting for external ACKs
             broadcastWriteOk(update);
             pendingAcks.remove(k);
         }
@@ -289,7 +291,7 @@ public class Replica extends AbstractReplica {
         if (checkAndApplyCrash(Crash.Type.Update)) return;
         long k = key(msg.epoch, msg.seqNum);
         if (!pendingUpdates.containsKey(k)) {
-            pendingUpdates.put(k, msg);
+            pendingUpdates.put(k, msg); // store only once; duplicate UPDATE must not overwrite
         }
         tell(new Ack(msg.epoch, msg.seqNum), getSender());
     }
@@ -308,7 +310,7 @@ public class Replica extends AbstractReplica {
             if (u != null) {
                 broadcastWriteOk(u);
             }
-            pendingAcks.remove(k);
+            pendingAcks.remove(k); // remove before any late ACKs can re-trigger WriteOk for the same update
         }
     }
 
@@ -322,7 +324,7 @@ public class Replica extends AbstractReplica {
         long k = key(msg.epoch, msg.seqNum);
         Update u = pendingUpdates.get(k);
         if (u == null) return;
-        if (historyContains(u.epoch, u.seqNum)) return;
+        if (historyContains(u.epoch, u.seqNum)) return; // already committed via SYNCHRONIZATION; skip
         applyUpdate(u);
     }
 
@@ -333,6 +335,7 @@ public class Replica extends AbstractReplica {
         callbackOnUpdateApplied(u.index, u.value);
         if (u.originReplica.equals(getSelf())) {
             tell(new WriteResponse(true, u.index, u.value, id), u.originClient);
+            // remove the pending forward that triggered this update (match by content, first occurrence)
             for (int i = 0; i < pendingForwards.size(); i++) {
                 PendingForward pf = pendingForwards.get(i);
                 if (pf.index == u.index && pf.value == u.value && pf.client.equals(u.originClient)) {
@@ -372,6 +375,7 @@ public class Replica extends AbstractReplica {
 
     private void scheduleHeartbeatTimeout() {
         cancel(heartbeatTimeoutSchedule);
+        // 2× beat interval: one full interval for the coordinator to send + one for max network latency
         heartbeatTimeoutSchedule = getContext().system().scheduler().scheduleOnce(
                 Duration.create(getCoordinatorBeatInterval() * 2L, TimeUnit.MILLISECONDS),
                 getSelf(),
@@ -427,6 +431,7 @@ public class Replica extends AbstractReplica {
                 getSelf());
     }
 
+    // Walk the ring clockwise (by sorted ID) skipping the crashed coordinator and any timed-out nodes
     private int nextRingTarget() {
         List<Integer> ids = new ArrayList<>(group.keySet());
         Collections.sort(ids);
@@ -451,11 +456,12 @@ public class Replica extends AbstractReplica {
         }
 
         if (alreadyInRing) {
+            // message has completed the ring; entries contain every live replica — elect the best one
             ElectionEntry winner = computeWinner(msg.entries);
             if (winner.replicaId == id) {
                 becomeCoordinator();
             } else {
-                tell(msg, group.get(winner.replicaId));
+                tell(msg, group.get(winner.replicaId)); // let the winner know it won
             }
         } else {
             if (!inElection) {
@@ -472,6 +478,7 @@ public class Replica extends AbstractReplica {
         }
     }
 
+    // Priority: highest epoch → highest seqNum → highest id (tiebreaker)
     private ElectionEntry computeWinner(List<ElectionEntry> entries) {
         ElectionEntry best = entries.get(0);
         for (ElectionEntry e : entries) {
@@ -499,7 +506,7 @@ public class Replica extends AbstractReplica {
     private void becomeCoordinator() {
         if (id == coordinatorId && !inElection) return;
         coordinatorId = id;
-        currentEpoch = Math.max(currentEpoch, lastEpoch()) + 1;
+        currentEpoch = Math.max(currentEpoch, lastEpoch()) + 1; // new epoch ensures updates are distinguishable from pre-crash ones
         sequenceNumber = 0;
         inElection = false;
         cancel(heartbeatTimeoutSchedule);
@@ -508,6 +515,7 @@ public class Replica extends AbstractReplica {
         broadcastToOthers(new Synchronization(id, currentEpoch, updateHistory));
         sendHeartbeats();
         scheduleNextHeartbeat();
+        // replay writes that arrived during the election so they are not lost
         for (PendingForward pf : new ArrayList<>(pendingForwards)) {
             coordinatorAcceptWrite(pf.index, pf.value, getSelf(), pf.client);
         }
@@ -520,6 +528,7 @@ public class Replica extends AbstractReplica {
         sequenceNumber = 0;
         inElection = false;
         cancel(electionAckTimeoutSchedule);
+        // apply any updates the new coordinator has that this replica missed (catch-up)
         for (Update u : msg.history) {
             if (!historyContains(u.epoch, u.seqNum)) {
                 positions[u.index] = u.value;
@@ -530,6 +539,7 @@ public class Replica extends AbstractReplica {
         }
         scheduleHeartbeatTimeout();
         callbackOnCoordinatorElected(msg.newCoordId);
+        // reforward writes that were pending before the election so they reach the new coordinator
         for (PendingForward pf : pendingForwards) {
             tell(new ForwardWrite(pf.index, pf.value, pf.client), group.get(msg.newCoordId));
         }
@@ -546,6 +556,8 @@ public class Replica extends AbstractReplica {
         cancel(electionAckTimeoutSchedule);
     }
 
+    // Called at the top of every handler that has a crash point.
+    // Returns true (and crashes) BEFORE the message is processed, so the Nth message is never handled.
     private boolean checkAndApplyCrash(Crash.Type type) {
         if (crashed) return true;
         if (pendingCrashType == type) {
@@ -569,6 +581,7 @@ public class Replica extends AbstractReplica {
 
     private int quorum() { return group.size() / 2 + 1; }
 
+    // Packs (epoch, seqNum) into a single long for use as a map key
     private long key(int epoch, int seqNum) {
         return ((long) epoch << 32) | (seqNum & 0xFFFFFFFFL);
     }
