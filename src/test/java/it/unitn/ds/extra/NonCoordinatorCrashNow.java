@@ -12,7 +12,6 @@ import akka.actor.ActorRef;
 import akka.testkit.javadsl.TestKit;
 import it.unitn.ds.AbstractClient;
 import it.unitn.ds.AbstractClient.WriteResult;
-import it.unitn.ds.AbstractReplica;
 import it.unitn.ds.AbstractReplica.Crash;
 import it.unitn.ds.Client;
 import it.unitn.ds.TestsCommons;

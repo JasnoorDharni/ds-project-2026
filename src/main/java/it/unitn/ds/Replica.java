@@ -180,6 +180,7 @@ public class Replica extends AbstractReplica {
     private final Map<Long, Set<Integer>> pendingAcks = new HashMap<>();
     private final List<PendingForward> pendingForwards = new ArrayList<>();
 
+    // trackers for crash state, crash type, and number of messages before crash is started 
     private boolean crashed = false;
     private Crash.Type pendingCrashType = null;
     private int pendingCrashCount = 0;
@@ -283,11 +284,13 @@ public class Replica extends AbstractReplica {
     // Read / Write handlers
     // =========================================================================
 
+    // reads are immediate, returning the value of the local replica
     private void onReadRequest(ReadRequest msg) {
         if (crashed) return;
         tell(new ReadResponse(msg.index, positions[msg.index], id), getSender());
     }
 
+    // writes are forwarded to the coordinator
     private void onWriteRequest(WriteRequest msg) {
         if (crashed) return;
         if (id == coordinatorId) {
@@ -300,10 +303,11 @@ public class Replica extends AbstractReplica {
 
     private void onForwardWrite(ForwardWrite msg) {
         if (crashed) return;
-        if (id != coordinatorId) return; // stale delivery after a leadership change; discard
+        if (id != coordinatorId) return; // stale delivery after a leadership change; discard TODO: make sure this does not drop client write requests, if not explain it in comment here for completeness
         coordinatorAcceptWrite(msg.index, msg.value, getSender(), msg.originalClient);
     }
 
+    // coordinator serializes a write request, broadcasts the update
     private void coordinatorAcceptWrite(int index, int value, ActorRef originReplica, ActorRef originClient) {
         int seqNum = sequenceNumber++;
         Update update = new Update(currentEpoch, seqNum, index, value, originReplica, originClient);
@@ -313,8 +317,8 @@ public class Replica extends AbstractReplica {
         acks.add(id); // coordinator self-ACKs; also covers the N=1 single-replica case
         pendingAcks.put(k, acks);
         broadcastToOthers(update);
+        // if quorum already met (single replica): commit immediately without waiting for external ACKs (otherwise we would be waiting forever for another ACK to confirm write success)
         if (acks.size() >= quorum()) {
-            // quorum already met (single replica): commit immediately without waiting for external ACKs
             broadcastWriteOk(update);
             pendingAcks.remove(k);
         }
