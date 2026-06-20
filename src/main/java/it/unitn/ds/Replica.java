@@ -22,11 +22,13 @@ public class Replica extends AbstractReplica {
     // Messages
     // =========================================================================
 
+    // Client → replica: request to read positions[index].
     public static class Read implements Serializable {
         public final int index;
         public Read(int index) { this.index = index; }
     }
 
+    // Replica → client: immediate reply carrying the current value of positions[index].
     public static class ReadResponse implements Serializable {
         public final int index;
         public final int value;
@@ -36,12 +38,15 @@ public class Replica extends AbstractReplica {
         }
     }
 
+    // Client → replica: request to write positions[index] = value. If the target is not the
+    // coordinator, the replica forwards it and keeps a PendingForward entry for response routing.
     public static class Write implements Serializable {
         public final int index;
         public final int value;
         public Write(int index, int value) { this.index = index; this.value = value; }
     }
 
+    // Replica → client: final acknowledgement that the write reached quorum and was committed.
     public static class WriteResponse implements Serializable {
         public final boolean success;
         public final int index;
@@ -52,6 +57,8 @@ public class Replica extends AbstractReplica {
         }
     }
 
+    // Relay sent by a non-coordinator to the coordinator; carries the original client ref so
+    // the coordinator can route the WriteResponse back without knowing the client directly.
     public static class ForwardWrite implements Serializable {
         public final int index;
         public final int value;
@@ -61,6 +68,9 @@ public class Replica extends AbstractReplica {
         }
     }
 
+    // Coordinator → all replicas (2PC phase 1): proposes a write identified by (epoch, seqNum).
+    // originReplica and originClient are threaded through so the commit path can send WriteResponse
+    // back to the right client without extra state in each replica.
     public static class Update implements Serializable {
         public final int epoch;
         public final int seqNum;
@@ -76,22 +86,31 @@ public class Replica extends AbstractReplica {
         }
     }
 
+    // Replica → coordinator (2PC phase 1 reply): signals that the replica stored the UPDATE
+    // and is ready to commit; counted by the coordinator towards the quorum.
     public static class Ack implements Serializable {
         public final int epoch;
         public final int seqNum;
         public Ack(int epoch, int seqNum) { this.epoch = epoch; this.seqNum = seqNum; }
     }
 
+    // Coordinator → all replicas (2PC phase 2): commit order for the update identified by
+    // (epoch, seqNum); on receipt each replica writes to positions[] and fires the callback.
     public static class WriteOk implements Serializable {
         public final int epoch;
         public final int seqNum;
         public WriteOk(int epoch, int seqNum) { this.epoch = epoch; this.seqNum = seqNum; }
     }
 
+    // Coordinator → all replicas: periodic liveness signal; receiving one resets the replica's
+    // heartbeat timeout, so silence for 2× the interval is treated as a coordinator crash.
     public static class Heartbeat implements Serializable {}
+    // Self-message sent by the scheduler to trigger the next periodic heartbeat broadcast.
     private static class BroadcastHeartbeat implements Serializable {}
+    // Self-message fired when no heartbeat has arrived within the deadline; initiates election.
     private static class HeartbeatTimeout implements Serializable {}
 
+    // One replica's vote record in the ELECTION ring message: the last (epoch, seqNum) it committed.
     public static class ElectionEntry implements Serializable {
         public final int replicaId;
         public final int epoch;
@@ -101,6 +120,8 @@ public class Replica extends AbstractReplica {
         }
     }
 
+    // Travels around the ring accumulating one ElectionEntry per live replica;
+    // when it returns to the initiator all live replicas are represented.
     public static class Election implements Serializable {
         public final List<ElectionEntry> entries;
         public final int crashedCoordId;
@@ -110,13 +131,18 @@ public class Replica extends AbstractReplica {
         }
     }
 
+    // Ring-hop target → sender: immediate receipt acknowledgement for an ELECTION message.
+    // Without it the sender cannot distinguish a slow hop from a crashed one.
     public static class ElectionAck implements Serializable {}
 
+    // Self-message: fired when the current ring-hop target did not ACK in time; skip and retry.
     private static class ElectionAckTimeout implements Serializable {
         public final int targetId;
         public ElectionAckTimeout(int targetId) { this.targetId = targetId; }
     }
 
+    // New coordinator → all replicas: announces leadership and delivers the full committed history
+    // so lagging replicas can apply any updates they missed before the election.
     public static class Synchronization implements Serializable {
         public final int newCoordId;
         public final int newEpoch;
@@ -131,6 +157,8 @@ public class Replica extends AbstractReplica {
     // State
     // =========================================================================
 
+    // Holds a write received from a client while this replica was not the coordinator.
+    // Kept until the update is committed (for response routing) and used to re-forward after election.
     private static class PendingForward {
         final int index;
         final int value;
@@ -146,7 +174,9 @@ public class Replica extends AbstractReplica {
     private int currentEpoch = 0;
     private int sequenceNumber = 0;
     private final List<Update> updateHistory = new ArrayList<>();
+    // Coordinator: updates awaiting quorum ACKs. Non-coordinator: updates awaiting WriteOk.
     private final Map<Long, Update> pendingUpdates = new HashMap<>();
+    // Coordinator only: tracks which replica IDs have ACKed each in-flight update.
     private final Map<Long, Set<Integer>> pendingAcks = new HashMap<>();
     private final List<PendingForward> pendingForwards = new ArrayList<>();
 
@@ -158,9 +188,11 @@ public class Replica extends AbstractReplica {
     private Cancellable heartbeatTimeoutSchedule;
     private Cancellable electionAckTimeoutSchedule;
 
+    // Guards against starting a second election while one is already in progress.
     private boolean inElection = false;
     private int electionCrashedCoordId = -1;
     private Election currentElection;
+    // Crashed coordinator plus any ring-hop targets that timed out in the current election round.
     private final Set<Integer> electionSkipped = new HashSet<>();
     private int electionCurrentTarget = -1;
 
@@ -267,7 +299,7 @@ public class Replica extends AbstractReplica {
 
     private void onForwardWrite(ForwardWrite msg) {
         if (crashed) return;
-        if (id != coordinatorId) return;
+        if (id != coordinatorId) return; // stale delivery after a leadership change; discard
         coordinatorAcceptWrite(msg.index, msg.value, getSender(), msg.originalClient);
     }
 
@@ -316,7 +348,7 @@ public class Replica extends AbstractReplica {
 
     private void broadcastWriteOk(Update update) {
         broadcastToOthers(new WriteOk(update.epoch, update.seqNum));
-        applyUpdate(update);
+        applyUpdate(update); // coordinator commits to itself as well (it does not send itself a WriteOk)
     }
 
     private void onWriteOk(WriteOk msg) {

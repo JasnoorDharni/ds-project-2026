@@ -10,12 +10,17 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
+// Akka actor that represents a client of the distributed replica system.
+// Sends Read/Write messages to replicas, arms a per-operation timeout timer, and on
+// response (or timeout) fires the appropriate AbstractClient callback for the test framework.
 public class Client extends AbstractClient {
 
+    // All maps below are keyed by array index; at most one pending read/write per position at a time.
     private final Map<Integer, Cancellable> pendingReadTimers = new HashMap<>();
     private final Map<Integer, Cancellable> pendingWriteTimers = new HashMap<>();
     private final Map<Integer, ActorRef> pendingReadReplicas = new HashMap<>();
     private final Map<Integer, ActorRef> pendingWriteReplicas = new HashMap<>();
+    // Retains the value sent so WriteTimeout can report exactly what was attempted.
     private final Map<Integer, Integer> pendingWriteValues = new HashMap<>();
 
     Client(long readTimeoutDelay, long writeTimeoutDelay,
