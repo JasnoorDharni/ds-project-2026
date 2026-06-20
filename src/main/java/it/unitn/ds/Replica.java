@@ -618,6 +618,7 @@ public class Replica extends AbstractReplica {
         return ((long) epoch << 32) | (seqNum & 0xFFFFFFFFL);
     }
 
+    // As suggested in README, broadcast uses the tell function to unify crash handling
     private void broadcastToOthers(Serializable msg) {
         for (Map.Entry<Integer, ActorRef> e : group.entrySet()) {
             if (e.getKey() != id) tell(msg, e.getValue());

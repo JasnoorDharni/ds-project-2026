@@ -57,3 +57,8 @@ gradle-app.setting
 CLAUDE.md
 *.pdf
 lab_material/
+
+# direnv exclusions
+.direnv/
+.envrc
+
