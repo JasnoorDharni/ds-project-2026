@@ -18,8 +18,6 @@ public class Client extends AbstractClient {
     // All maps below are keyed by array index; at most one pending read/write per position at a time.
     private final Map<Integer, Cancellable> pendingReadTimers = new HashMap<>();
     private final Map<Integer, Cancellable> pendingWriteTimers = new HashMap<>();
-    private final Map<Integer, ActorRef> pendingReadReplicas = new HashMap<>();
-    private final Map<Integer, ActorRef> pendingWriteReplicas = new HashMap<>();
     // Retains the value sent so WriteTimeout can report exactly what was attempted.
     private final Map<Integer, Integer> pendingWriteValues = new HashMap<>();
 
@@ -47,7 +45,6 @@ public class Client extends AbstractClient {
     @Override
     public void sendRead(ActorRef replica, int index) {
         replica.tell(new Replica.Read(index), getSelf());
-        pendingReadReplicas.put(index, replica);
         cancel(pendingReadTimers.remove(index)); // cancel any stale timer if client retries the same index
         Cancellable t = getContext().system().scheduler().scheduleOnce(
                 Duration.create(getReadTimeoutDelay(), TimeUnit.MILLISECONDS),
@@ -61,7 +58,6 @@ public class Client extends AbstractClient {
     @Override
     public void sendWrite(ActorRef replica, int index, int value) {
         replica.tell(new Replica.Write(index, value), getSelf());
-        pendingWriteReplicas.put(index, replica);
         pendingWriteValues.put(index, value);
         cancel(pendingWriteTimers.remove(index)); // cancel any stale timer if client retries the same index
         Cancellable t = getContext().system().scheduler().scheduleOnce(
@@ -89,13 +85,11 @@ public class Client extends AbstractClient {
 
     private void onReadResponse(Replica.ReadResponse msg) {
         cancel(pendingReadTimers.remove(msg.index));
-        pendingReadReplicas.remove(msg.index);
         callbackOnReadResult(new ReadResult(true, msg.index, msg.value, msg.replicaId));
     }
 
     private void onWriteResponse(Replica.WriteResponse msg) {
         cancel(pendingWriteTimers.remove(msg.index));
-        pendingWriteReplicas.remove(msg.index);
         pendingWriteValues.remove(msg.index);
         callbackOnWriteResult(new WriteResult(msg.success, msg.index, msg.value, msg.replicaId));
     }
@@ -103,14 +97,12 @@ public class Client extends AbstractClient {
     private void onReadTimeout(AbstractClient.ReadTimeout msg) {
         if (!pendingReadTimers.containsKey(msg.index)) return; // response already arrived; discard stale timeout
         pendingReadTimers.remove(msg.index);
-        pendingReadReplicas.remove(msg.index);
         callbackOnReadTimeout(msg);
     }
 
     private void onWriteTimeout(AbstractClient.WriteTimeout msg) {
         if (!pendingWriteTimers.containsKey(msg.index)) return; // response already arrived; discard stale timeout
         pendingWriteTimers.remove(msg.index);
-        pendingWriteReplicas.remove(msg.index);
         pendingWriteValues.remove(msg.index);
         callbackOnWriteTimeout(msg);
     }
