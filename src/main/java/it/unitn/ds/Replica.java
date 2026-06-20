@@ -133,7 +133,12 @@ public class Replica extends AbstractReplica {
 
     // Ring-hop target → sender: immediate receipt acknowledgement for an ELECTION message.
     // Without it the sender cannot distinguish a slow hop from a crashed one.
-    public static class ElectionAck implements Serializable {}
+    // replicaId identifies the responder so a late ACK from a hop already skipped
+    // does not cancel the timeout armed for the current target.
+    public static class ElectionAck implements Serializable {
+        public final int replicaId;
+        public ElectionAck(int replicaId) { this.replicaId = replicaId; }
+    }
 
     // Self-message: fired when the current ring-hop target did not ACK in time; skip and retry.
     private static class ElectionAckTimeout implements Serializable {
@@ -369,6 +374,7 @@ public class Replica extends AbstractReplica {
         positions[u.index] = u.value;
         updateHistory.add(u);
         pendingUpdates.remove(key(u.epoch, u.seqNum));
+        log("applied update " + u.epoch + ":" + u.seqNum + " (" + u.index + ", " + u.value + ")");
         callbackOnUpdateApplied(u.index, u.value);
         if (u.originReplica.equals(getSelf())) {
             tell(new WriteResponse(true, u.index, u.value, id), u.originClient);
@@ -485,7 +491,7 @@ public class Replica extends AbstractReplica {
 
     private void onElection(Election msg) {
         if (checkAndApplyCrash(Crash.Type.Election)) return;
-        tell(new ElectionAck(), getSender());
+        tell(new ElectionAck(id), getSender());
 
         boolean alreadyInRing = false;
         for (ElectionEntry e : msg.entries) {
@@ -530,6 +536,9 @@ public class Replica extends AbstractReplica {
 
     private void onElectionAck(ElectionAck msg) {
         if (crashed) return;
+        // ignore late ACKs from hops already skipped: they would otherwise cancel
+        // the timeout armed for the new (current) target and stall the election
+        if (msg.replicaId != electionCurrentTarget) return;
         cancel(electionAckTimeoutSchedule);
     }
 
@@ -565,19 +574,21 @@ public class Replica extends AbstractReplica {
         sequenceNumber = 0;
         inElection = false;
         cancel(electionAckTimeoutSchedule);
-        // apply any updates the new coordinator has that this replica missed (catch-up)
+        // Catch-up: route every missed update through applyUpdate so that
+        //  - WriteResponse is sent to the client if this replica was the origin
+        //    (otherwise the client would time out for an actually-committed write)
+        //  - the matching pendingForward is removed (otherwise the next loop would
+        //    re-forward an already-committed write and trigger a duplicate apply)
         for (Update u : msg.history) {
             if (!historyContains(u.epoch, u.seqNum)) {
-                positions[u.index] = u.value;
-                updateHistory.add(u);
-                pendingUpdates.remove(key(u.epoch, u.seqNum));
-                callbackOnUpdateApplied(u.index, u.value);
+                applyUpdate(u);
             }
         }
         scheduleHeartbeatTimeout();
         callbackOnCoordinatorElected(msg.newCoordId);
-        // reforward writes that were pending before the election so they reach the new coordinator
-        for (PendingForward pf : pendingForwards) {
+        // re-forward only the writes still pending after catch-up; iterate over a snapshot
+        // since applyUpdate may have pruned the list above
+        for (PendingForward pf : new ArrayList<>(pendingForwards)) {
             tell(new ForwardWrite(pf.index, pf.value, pf.client), group.get(msg.newCoordId));
         }
     }
