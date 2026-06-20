@@ -23,9 +23,9 @@ public class Replica extends AbstractReplica {
     // =========================================================================
 
     // Client → replica: request to read positions[index].
-    public static class Read implements Serializable {
+    public static class ReadRequest implements Serializable {
         public final int index;
-        public Read(int index) { this.index = index; }
+        public ReadRequest(int index) { this.index = index; }
     }
 
     // Replica → client: immediate reply carrying the current value of positions[index].
@@ -40,10 +40,10 @@ public class Replica extends AbstractReplica {
 
     // Client → replica: request to write positions[index] = value. If the target is not the
     // coordinator, the replica forwards it and keeps a PendingForward entry for response routing.
-    public static class Write implements Serializable {
+    public static class WriteRequest implements Serializable {
         public final int index;
         public final int value;
-        public Write(int index, int value) { this.index = index; this.value = value; }
+        public WriteRequest(int index, int value) { this.index = index; this.value = value; }
     }
 
     // Replica → client: final acknowledgement that the write reached quorum and was committed.
@@ -262,8 +262,8 @@ public class Replica extends AbstractReplica {
     @Override
     public final Receive createReceive() {
         return createBaseReceiveBuilder()
-                .match(Read.class, this::onRead)
-                .match(Write.class, this::onWrite)
+                .match(ReadRequest.class, this::onRead)
+                .match(WriteRequest.class, this::onWrite)
                 .match(ForwardWrite.class, this::onForwardWrite)
                 .match(Update.class, this::onUpdate)
                 .match(Ack.class, this::onAck)
@@ -282,12 +282,12 @@ public class Replica extends AbstractReplica {
     // Read / Write handlers
     // =========================================================================
 
-    private void onRead(Read msg) {
+    private void onRead(ReadRequest msg) {
         if (crashed) return;
         tell(new ReadResponse(msg.index, positions[msg.index], id), getSender());
     }
 
-    private void onWrite(Write msg) {
+    private void onWrite(WriteRequest msg) {
         if (crashed) return;
         if (id == coordinatorId) {
             coordinatorAcceptWrite(msg.index, msg.value, getSelf(), getSender());

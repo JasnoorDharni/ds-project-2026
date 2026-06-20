@@ -44,7 +44,7 @@ public class Client extends AbstractClient {
 
     @Override
     public void sendRead(ActorRef replica, int index) {
-        replica.tell(new Replica.Read(index), getSelf());
+        replica.tell(new Replica.ReadRequest(index), getSelf());
         cancel(pendingReadTimers.remove(index)); // cancel any stale timer if client retries the same index
         Cancellable t = getContext().system().scheduler().scheduleOnce(
                 Duration.create(getReadTimeoutDelay(), TimeUnit.MILLISECONDS),
@@ -57,7 +57,7 @@ public class Client extends AbstractClient {
 
     @Override
     public void sendWrite(ActorRef replica, int index, int value) {
-        replica.tell(new Replica.Write(index, value), getSelf());
+        replica.tell(new Replica.WriteRequest(index, value), getSelf());
         pendingWriteValues.put(index, value);
         cancel(pendingWriteTimers.remove(index)); // cancel any stale timer if client retries the same index
         Cancellable t = getContext().system().scheduler().scheduleOnce(
