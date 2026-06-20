@@ -103,7 +103,7 @@ public class Replica extends AbstractReplica {
     }
 
     // Coordinator → all replicas: periodic liveness signal; receiving one resets the replica's
-    // heartbeat timeout, so silence for 2× the interval is treated as a coordinator crash.
+    // heartbeat timeout, silence for 2× the interval is treated as a coordinator crash.
     public static class Heartbeat implements Serializable {}
     // Self-message sent by the scheduler to trigger the next periodic heartbeat broadcast.
     private static class BroadcastHeartbeat implements Serializable {}
@@ -190,11 +190,12 @@ public class Replica extends AbstractReplica {
 
     // Guards against starting a second election while one is already in progress.
     private boolean inElection = false;
-    private int electionCrashedCoordId = -1;
+    private int electionCrashedCoordId = -1; // TODO: right now it's not being used, decide if it's needed for crashed election edge cases, otherwise remove
     private Election currentElection;
     // Crashed coordinator plus any ring-hop targets that timed out in the current election round.
     private final Set<Integer> electionSkipped = new HashSet<>();
-    private int electionCurrentTarget = -1;
+    // tracks the last replica that was forwarded an election message (not necessarily the successor due to crashes)
+    private int electionCurrentTarget = -1; 
 
     // =========================================================================
     // Constructors / Props
@@ -262,8 +263,8 @@ public class Replica extends AbstractReplica {
     @Override
     public final Receive createReceive() {
         return createBaseReceiveBuilder()
-                .match(ReadRequest.class, this::onRead)
-                .match(WriteRequest.class, this::onWrite)
+                .match(ReadRequest.class, this::onReadRequest)
+                .match(WriteRequest.class, this::onWriteRequest)
                 .match(ForwardWrite.class, this::onForwardWrite)
                 .match(Update.class, this::onUpdate)
                 .match(Ack.class, this::onAck)
@@ -282,12 +283,12 @@ public class Replica extends AbstractReplica {
     // Read / Write handlers
     // =========================================================================
 
-    private void onRead(ReadRequest msg) {
+    private void onReadRequest(ReadRequest msg) {
         if (crashed) return;
         tell(new ReadResponse(msg.index, positions[msg.index], id), getSender());
     }
 
-    private void onWrite(WriteRequest msg) {
+    private void onWriteRequest(WriteRequest msg) {
         if (crashed) return;
         if (id == coordinatorId) {
             coordinatorAcceptWrite(msg.index, msg.value, getSelf(), getSender());
