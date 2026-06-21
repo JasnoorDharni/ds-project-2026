@@ -8,6 +8,7 @@ import scala.concurrent.duration.Duration;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -146,6 +147,10 @@ public class Replica extends AbstractReplica {
         public ElectionAckTimeout(int targetId) { this.targetId = targetId; }
     }
 
+    // Self-message: fired when an election has been running too long without producing a
+    // SYNCHRONIZATION; covers the case where the elected winner crashes before broadcasting SYNC.
+    private static class ElectionTerminationTimeout implements Serializable {}
+
     // New coordinator → all replicas: announces leadership and delivers the full committed history
     // so lagging replicas can apply any updates they missed before the election.
     public static class Synchronization implements Serializable {
@@ -193,10 +198,11 @@ public class Replica extends AbstractReplica {
     private Cancellable heartbeatSchedule;
     private Cancellable heartbeatTimeoutSchedule;
     private Cancellable electionAckTimeoutSchedule;
+    private Cancellable electionTerminationTimeoutSchedule;
 
     // Guards against starting a second election while one is already in progress.
     private boolean inElection = false;
-    private int electionCrashedCoordId = -1; // TODO: right now it's not being used, decide if it's needed for crashed election edge cases, otherwise remove
+    private int electionCrashedCoordId = -1;
     private Election currentElection;
     // Crashed coordinator plus any ring-hop targets that timed out in the current election round.
     private final Set<Integer> electionSkipped = new HashSet<>();
@@ -281,6 +287,7 @@ public class Replica extends AbstractReplica {
                 .match(Election.class, this::onElection)
                 .match(ElectionAck.class, this::onElectionAck)
                 .match(ElectionAckTimeout.class, this::onElectionAckTimeout)
+                .match(ElectionTerminationTimeout.class, this::onElectionTerminationTimeout)
                 .match(Synchronization.class, this::onSynchronization)
                 .build();
     }
@@ -450,6 +457,7 @@ public class Replica extends AbstractReplica {
         electionSkipped.clear();
         electionSkipped.add(crashedCoordId);
         callbackOnElectionStarted(crashedCoordId);
+        armElectionTerminationTimeout();
 
         List<ElectionEntry> entries = new ArrayList<>();
         entries.add(new ElectionEntry(id, lastEpoch(), lastSeqNum()));
@@ -513,6 +521,7 @@ public class Replica extends AbstractReplica {
                 electionSkipped.clear();
                 electionSkipped.add(msg.crashedCoordId);
                 callbackOnElectionStarted(msg.crashedCoordId);
+                armElectionTerminationTimeout();
             }
             List<ElectionEntry> newEntries = new ArrayList<>(msg.entries);
             newEntries.add(new ElectionEntry(id, lastEpoch(), lastSeqNum()));
@@ -549,6 +558,29 @@ public class Replica extends AbstractReplica {
         forwardElection();
     }
 
+    // Arms a fallback timer that restarts the election if SYNCHRONIZATION never arrives.
+    // Covers the case where the elected winner crashes before broadcasting SYNC (Hint 2).
+    private void armElectionTerminationTimeout() {
+        cancel(electionTerminationTimeoutSchedule);
+        long detection = (long)(getCoordinatorBeatInterval() * 3L) + ((long) getMaxLatency() * getSystemNumberOfActors() * 2);
+        long ringHops = (long) getSystemNumberOfActors() * getMaxLatency() * 2;
+        long delay = (detection + ringHops) * 5 * 2; // 2× the expected max election duration
+        electionTerminationTimeoutSchedule = getContext().system().scheduler().scheduleOnce(
+                Duration.create(delay, TimeUnit.MILLISECONDS),
+                getSelf(),
+                new ElectionTerminationTimeout(),
+                getContext().dispatcher(),
+                getSelf());
+    }
+
+    private void onElectionTerminationTimeout(ElectionTerminationTimeout msg) {
+        if (crashed) return;
+        if (!inElection) return; // already resolved via SYNCHRONIZATION
+        // Election stalled (winner likely crashed before sending SYNC); restart.
+        inElection = false;
+        startElection(coordinatorId);
+    }
+
     private void becomeCoordinator() {
         if (id == coordinatorId && !inElection) return;
         coordinatorId = id;
@@ -557,7 +589,18 @@ public class Replica extends AbstractReplica {
         inElection = false;
         cancel(heartbeatTimeoutSchedule);
         cancel(electionAckTimeoutSchedule);
+        cancel(electionTerminationTimeoutSchedule);
         callbackOnCoordinatorElected(id);
+        // Hint 3: commit any updates the old coordinator may have applied before crashing
+        // (received UPDATE + sent ACK, but WRITEOK never arrived). Applying them here ensures
+        // they appear in the SYNCHRONIZATION history, satisfying uniform agreement.
+        List<Update> uncommitted = new ArrayList<>(pendingUpdates.values());
+        uncommitted.sort(Comparator.comparingInt((Update u) -> u.epoch).thenComparingInt(u -> u.seqNum));
+        for (Update u : uncommitted) {
+            if (!historyContains(u.epoch, u.seqNum)) {
+                applyUpdate(u);
+            }
+        }
         broadcastToOthers(new Synchronization(id, currentEpoch, updateHistory));
         sendHeartbeats();
         scheduleNextHeartbeat();
@@ -574,6 +617,7 @@ public class Replica extends AbstractReplica {
         sequenceNumber = 0;
         inElection = false;
         cancel(electionAckTimeoutSchedule);
+        cancel(electionTerminationTimeoutSchedule);
         // Catch-up: route every missed update through applyUpdate so that
         //  - WriteResponse is sent to the client if this replica was the origin
         //    (otherwise the client would time out for an actually-committed write)
@@ -602,6 +646,7 @@ public class Replica extends AbstractReplica {
         cancel(heartbeatSchedule);
         cancel(heartbeatTimeoutSchedule);
         cancel(electionAckTimeoutSchedule);
+        cancel(electionTerminationTimeoutSchedule);
     }
 
     // Called at the top of every handler that has a crash point.
