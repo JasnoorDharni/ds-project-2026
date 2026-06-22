@@ -163,6 +163,19 @@ public class Replica extends AbstractReplica {
         }
     }
 
+    // Self-message: fired if UPDATE not received after sending ForwardWrite
+    private static class ForwardWriteTimeoutMsg implements Serializable {
+        public final long forwardId;
+        public ForwardWriteTimeoutMsg(long forwardId) { this.forwardId = forwardId; }
+    }
+
+    // Self-message: fired if WRITEOK not received in time after sending Ack
+    private static class PendingWriteOkTimeoutMsg implements Serializable {
+        public final int epoch;
+        public final int seqNum;
+        public PendingWriteOkTimeoutMsg(int epoch, int seqNum) { this.epoch = epoch; this.seqNum = seqNum; }
+    }
+
     // =========================================================================
     // State
     // =========================================================================
@@ -170,11 +183,12 @@ public class Replica extends AbstractReplica {
     // Holds a write received from a client while this replica was not the coordinator.
     // Kept until the update is committed (for response routing) and used to re-forward after election.
     private static class PendingForward {
+        final long id;       // used to identify the timer
         final int index;
         final int value;
         final ActorRef client;
-        PendingForward(int index, int value, ActorRef client) {
-            this.index = index; this.value = value; this.client = client;
+        PendingForward(long id, int index, int value, ActorRef client) {
+            this.id = id; this.index = index; this.value = value; this.client = client;
         }
     }
 
@@ -199,6 +213,10 @@ public class Replica extends AbstractReplica {
     private Cancellable heartbeatTimeoutSchedule;
     private Cancellable electionAckTimeoutSchedule;
     private Cancellable electionTerminationTimeoutSchedule;
+
+    private long nextForwardId = 0;
+    private final Map<Long, Cancellable> forwardTimers = new HashMap<>();
+    private final Map<Long, Cancellable> updateTimers = new HashMap<>();
 
     // Guards against starting a second election while one is already in progress.
     private boolean inElection = false;
@@ -289,6 +307,8 @@ public class Replica extends AbstractReplica {
                 .match(ElectionAckTimeout.class, this::onElectionAckTimeout)
                 .match(ElectionTerminationTimeout.class, this::onElectionTerminationTimeout)
                 .match(Synchronization.class, this::onSynchronization)
+                .match(ForwardWriteTimeoutMsg.class, this::onForwardWriteTimeout)
+                .match(PendingWriteOkTimeoutMsg.class, this::onPendingWriteOkTimeout)
                 .build();
     }
 
@@ -308,8 +328,10 @@ public class Replica extends AbstractReplica {
         if (id == coordinatorId) {
             coordinatorAcceptWrite(msg.index, msg.value, getSelf(), getSender());
         } else {
-            pendingForwards.add(new PendingForward(msg.index, msg.value, getSender()));
+            long fId = nextForwardId++;
+            pendingForwards.add(new PendingForward(fId, msg.index, msg.value, getSender()));
             tell(new ForwardWrite(msg.index, msg.value, getSender()), group.get(coordinatorId));
+            armForwardTimer(fId);
         }
     }
 
@@ -340,8 +362,29 @@ public class Replica extends AbstractReplica {
         if (checkAndApplyCrash(Crash.Type.Update)) return;
         long k = key(msg.epoch, msg.seqNum);
         if (!pendingUpdates.containsKey(k)) {
-            pendingUpdates.put(k, msg); // store only once; duplicate UPDATE must not overwrite
+            pendingUpdates.put(k, msg);
         }
+
+        if (id != coordinatorId) {
+            cancel(updateTimers.get(k));
+            Cancellable c = getContext().system().scheduler().scheduleOnce(
+                    Duration.create(getMaxLatency() * 4L, TimeUnit.MILLISECONDS),
+                    getSelf(),
+                    new PendingWriteOkTimeoutMsg(msg.epoch, msg.seqNum),
+                    getContext().system().dispatcher(),
+                    getSelf());
+            updateTimers.put(k, c);
+        }
+
+        if (msg.originReplica.equals(getSelf())) {
+            for (PendingForward pf : pendingForwards) {
+                if (pf.index == msg.index && pf.value == msg.value && pf.client.equals(msg.originClient)) {
+                    cancel(forwardTimers.remove(pf.id));
+                    break;
+                }
+            }
+        }
+
         tell(new Ack(msg.epoch, msg.seqNum), getSender());
     }
 
@@ -378,6 +421,7 @@ public class Replica extends AbstractReplica {
     }
 
     private void applyUpdate(Update u) {
+        cancel(updateTimers.remove(key(u.epoch, u.seqNum)));
         positions[u.index] = u.value;
         updateHistory.add(u);
         pendingUpdates.remove(key(u.epoch, u.seqNum));
@@ -385,10 +429,10 @@ public class Replica extends AbstractReplica {
         callbackOnUpdateApplied(u.index, u.value);
         if (u.originReplica.equals(getSelf())) {
             tell(new WriteResponse(true, u.index, u.value, id), u.originClient);
-            // remove the pending forward that triggered this update (match by content, first occurrence)
             for (int i = 0; i < pendingForwards.size(); i++) {
                 PendingForward pf = pendingForwards.get(i);
                 if (pf.index == u.index && pf.value == u.value && pf.client.equals(u.originClient)) {
+                    cancel(forwardTimers.remove(pf.id));
                     pendingForwards.remove(i);
                     break;
                 }
@@ -445,6 +489,23 @@ public class Replica extends AbstractReplica {
         if (inElection) return;
         if (id == coordinatorId) return;
         startElection(coordinatorId);
+    }
+
+    private void onForwardWriteTimeout(ForwardWriteTimeoutMsg msg) {
+        if (crashed || inElection) return;
+        if (forwardTimers.remove(msg.forwardId) != null) {
+            log("Timeout waiting for UPDATE after ForwardWrite. Assuming coordinator crash.");
+            startElection(coordinatorId);
+        }
+    }
+
+    private void onPendingWriteOkTimeout(PendingWriteOkTimeoutMsg msg) {
+        if (crashed || inElection) return;
+        long k = key(msg.epoch, msg.seqNum);
+        if (updateTimers.remove(k) != null) {
+            log("Timeout waiting for WRITEOK. Assuming coordinator crash.");
+            startElection(coordinatorId);
+        }
     }
 
     // =========================================================================
@@ -602,6 +663,10 @@ public class Replica extends AbstractReplica {
             }
         }
         broadcastToOthers(new Synchronization(id, currentEpoch, updateHistory));
+        for (Cancellable c : forwardTimers.values()) cancel(c);
+        forwardTimers.clear();
+        for (Cancellable c : updateTimers.values()) cancel(c);
+        updateTimers.clear();
         sendHeartbeats();
         scheduleNextHeartbeat();
         // replay writes that arrived during the election so they are not lost
@@ -634,6 +699,7 @@ public class Replica extends AbstractReplica {
         // since applyUpdate may have pruned the list above
         for (PendingForward pf : new ArrayList<>(pendingForwards)) {
             tell(new ForwardWrite(pf.index, pf.value, pf.client), group.get(msg.newCoordId));
+            armForwardTimer(pf.id);
         }
     }
 
@@ -647,6 +713,10 @@ public class Replica extends AbstractReplica {
         cancel(heartbeatTimeoutSchedule);
         cancel(electionAckTimeoutSchedule);
         cancel(electionTerminationTimeoutSchedule);
+        for (Cancellable c : forwardTimers.values()) cancel(c);
+        forwardTimers.clear();
+        for (Cancellable c : updateTimers.values()) cancel(c);
+        updateTimers.clear();
     }
 
     // Called at the top of every handler that has a crash point.
@@ -705,5 +775,17 @@ public class Replica extends AbstractReplica {
             if (e.getValue().equals(ref)) return e.getKey();
         }
         return -1;
+    }
+
+    private void armForwardTimer(long fId) {
+        cancel(forwardTimers.get(fId));
+        // max latency forward + max latency update = 2x. using 4x to avoid false positives
+        Cancellable c = getContext().system().scheduler().scheduleOnce(
+                Duration.create(getMaxLatency() * 4L, TimeUnit.MILLISECONDS),
+                getSelf(),
+                new ForwardWriteTimeoutMsg(fId),
+                getContext().system().dispatcher(),
+                getSelf());
+        forwardTimers.put(fId, c);
     }
 }
