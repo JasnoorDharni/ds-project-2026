@@ -650,7 +650,6 @@ public class Replica extends AbstractReplica {
 
     private void becomeCoordinator() {
         if (id == coordinatorId && !inElection) return;
-        log("Elected as NEW COORDINATOR for epoch " + (Math.max(currentEpoch, lastEpoch()) + 1));
         coordinatorId = id;
         currentEpoch = Math.max(currentEpoch, lastEpoch()) + 1; // new epoch ensures updates are distinguishable from pre-crash ones
         sequenceNumber = 0;
