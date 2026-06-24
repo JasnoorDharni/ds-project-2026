@@ -141,15 +141,6 @@ public class Replica extends AbstractReplica {
         public ElectionAck(int replicaId) { this.replicaId = replicaId; }
     }
 
-    // Self-message: fired when the current ring-hop target did not ACK in time; skip and retry.
-    private static class ElectionAckTimeout implements Serializable {
-        public final int targetId;
-        public ElectionAckTimeout(int targetId) { this.targetId = targetId; }
-    }
-
-    // Self-message: fired when an election has been running too long without producing a
-    // SYNCHRONIZATION; covers the case where the elected winner crashes before broadcasting SYNC.
-    private static class ElectionTerminationTimeout implements Serializable {}
 
     // New coordinator → all replicas: announces leadership and delivers the full committed history
     // so lagging replicas can apply any updates they missed before the election.
@@ -163,17 +154,39 @@ public class Replica extends AbstractReplica {
         }
     }
 
-    // Self-message: fired if UPDATE not received after sending ForwardWrite
+    // =========================================================================
+    // Messages > Self-scheduling
+    // =========================================================================
+
+    // fired when the current ring-hop target did not ACK in time; skip and retry.
+    private static class ElectionAckTimeout implements Serializable {
+        public final int targetId;
+        public ElectionAckTimeout(int targetId) { this.targetId = targetId; }
+    }
+
+    // fired when an election has been running too long without producing a
+    // SYNCHRONIZATION; covers the case where the elected winner crashes before broadcasting SYNC.
+    private static class ElectionTerminationTimeout implements Serializable {}
+
+    // fired if UPDATE not received after sending ForwardWrite
     private static class ForwardWriteTimeoutMsg implements Serializable {
         public final long forwardId;
         public ForwardWriteTimeoutMsg(long forwardId) { this.forwardId = forwardId; }
     }
 
-    // Self-message: fired if WRITEOK not received in time after sending Ack
+    // fired if WRITEOK not received in time after sending Ack
     private static class PendingWriteOkTimeoutMsg implements Serializable {
         public final int epoch;
         public final int seqNum;
         public PendingWriteOkTimeoutMsg(int epoch, int seqNum) { this.epoch = epoch; this.seqNum = seqNum; }
+    }
+
+    // fired after delay from staggeredElectionStartSchedule
+    public static class StaggeredElectionStartTimeout {
+        public final int crashedCoordId;
+        public StaggeredElectionStartTimeout(int crashedCoordId) {
+            this.crashedCoordId = crashedCoordId;
+        }
     }
 
     // =========================================================================
@@ -213,6 +226,7 @@ public class Replica extends AbstractReplica {
     private Cancellable heartbeatTimeoutSchedule;
     private Cancellable electionAckTimeoutSchedule;
     private Cancellable electionTerminationTimeoutSchedule;
+    private Cancellable staggeredElectionStartSchedule;
 
     private long nextForwardId = 0;
     private final Map<Long, Cancellable> forwardTimers = new HashMap<>();
@@ -308,6 +322,7 @@ public class Replica extends AbstractReplica {
                 .match(Synchronization.class, this::onSynchronization)
                 .match(ForwardWriteTimeoutMsg.class, this::onForwardWriteTimeout)
                 .match(PendingWriteOkTimeoutMsg.class, this::onPendingWriteOkTimeout)
+                .match(StaggeredElectionStartTimeout.class, this::onStaggeredElectionStartTimeout)
                 .build();
     }
 
@@ -489,14 +504,14 @@ public class Replica extends AbstractReplica {
         if (inElection) return;
         if (id == coordinatorId) return;
         log("Heartbeat timeout. Assuming coordinator " + coordinatorId + " crashed.");
-        startElection(coordinatorId);
+        armStaggeredElectionStartTimeout(coordinatorId,id * getMaxLatencyPlusTolerance());
     }
 
     private void onForwardWriteTimeout(ForwardWriteTimeoutMsg msg) {
         if (crashed || inElection) return;
         if (forwardTimers.remove(msg.forwardId) != null) {
             log("Timeout waiting for UPDATE after ForwardWrite. Assuming coordinator crash.");
-            startElection(coordinatorId);
+            armStaggeredElectionStartTimeout(coordinatorId,0);
         }
     }
 
@@ -505,13 +520,33 @@ public class Replica extends AbstractReplica {
         long k = key(msg.epoch, msg.seqNum);
         if (updateTimers.remove(k) != null) {
             log("Timeout waiting for WRITEOK. Assuming coordinator crash.");
-            startElection(coordinatorId);
+            armStaggeredElectionStartTimeout(coordinatorId,0);
         }
     }
 
+
     // =========================================================================
-    // Election (ring-based)
+    // Election > Staggered Start 
     // =========================================================================
+
+    // replicas that notice coordinator crash through heartbeats will pass delay = id*getMaxLatencyPlusTolerance, replicas that notice through write attemps will pass 0
+    private void armStaggeredElectionStartTimeout(int crashedCoordId, long delay){
+        cancel(staggeredElectionStartSchedule);
+        electionAckTimeoutSchedule = getContext().system().scheduler().scheduleOnce(
+                Duration.create(delay, TimeUnit.MILLISECONDS),
+                getSelf(),
+                new StaggeredElectionStartTimeout(crashedCoordId),
+                getContext().system().dispatcher(),
+                getSelf());
+    }
+
+
+    private void onStaggeredElectionStartTimeout(StaggeredElectionStartTimeout msg) {
+        if (crashed) return;
+        log("Starting election after random timeout...");
+        startElection(msg.crashedCoordId);
+    }
+
 
     private void startElection(int crashedCoordId) {
         inElection = true;
@@ -525,6 +560,12 @@ public class Replica extends AbstractReplica {
         currentElection = new Election(entries, crashedCoordId);
         forwardElection();
     }
+
+
+    // =========================================================================
+    // Election > ring forwarding
+    // =========================================================================
+
 
     private void forwardElection() {
         int target = nextRingTarget();
@@ -554,6 +595,9 @@ public class Replica extends AbstractReplica {
     }
 
     private void onElection(Election msg) {
+        // avoid starting another election while still forwarding the current one
+        cancel(staggeredElectionStartSchedule);
+
         if (checkAndApplyCrash(Crash.Type.Election)) return;
         tell(new ElectionAck(id), getSender());
 
@@ -628,7 +672,7 @@ public class Replica extends AbstractReplica {
         // Election stalled (winner likely crashed before sending SYNC); restart.
         log("Election termination timeout. Election stalled, restarting...");
         inElection = false;
-        startElection(coordinatorId);
+        armStaggeredElectionStartTimeout(coordinatorId,id * getMaxLatencyPlusTolerance());
     }
 
     // =========================================================================

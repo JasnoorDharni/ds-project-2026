@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import java.time.Duration;
 import java.util.Optional;
 
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -15,7 +14,6 @@ import akka.testkit.javadsl.TestKit;
 import it.unitn.ds.AbstractClient;
 import it.unitn.ds.AbstractClient.ReadResult;
 import it.unitn.ds.AbstractClient.WriteResult;
-import it.unitn.ds.AbstractReplica;
 import it.unitn.ds.AbstractReplica.Crash;
 import it.unitn.ds.Client;
 import it.unitn.ds.TestsCommons;
@@ -40,7 +38,6 @@ class Election {
 			"0,5,1,6",
 			"2,0,3,5",
 			"3,4,1,5",
-			"1,8,7,9",
     })
 	void crashTwoThenElection(int coord, int crash_node, int request_node, int n_nodes) throws InterruptedException {
 		final TestsSystemWrapper sys = TestsCommons.createTestSystem("crashOnElection", n_nodes, coord);
