@@ -220,7 +220,6 @@ public class Replica extends AbstractReplica {
 
     // Guards against starting a second election while one is already in progress.
     private boolean inElection = false;
-    private int electionCrashedCoordId = -1;  // TODO: right now it's not being used, decide if it's needed for crashed election edge cases, otherwise remove
     private Election currentElection;
     // Crashed coordinator plus any ring-hop targets that timed out in the current election round.
     private final Set<Integer> electionSkipped = new HashSet<>();
@@ -516,7 +515,6 @@ public class Replica extends AbstractReplica {
 
     private void startElection(int crashedCoordId) {
         inElection = true;
-        electionCrashedCoordId = crashedCoordId;
         electionSkipped.clear();
         electionSkipped.add(crashedCoordId);
         callbackOnElectionStarted(crashedCoordId);
@@ -580,7 +578,6 @@ public class Replica extends AbstractReplica {
         } else {
             if (!inElection) {
                 inElection = true;
-                electionCrashedCoordId = msg.crashedCoordId;
                 electionSkipped.clear();
                 electionSkipped.add(msg.crashedCoordId);
                 callbackOnElectionStarted(msg.crashedCoordId);
