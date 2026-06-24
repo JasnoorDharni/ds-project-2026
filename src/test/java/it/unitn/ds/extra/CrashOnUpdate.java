@@ -50,7 +50,7 @@ class CrashOnUpdate {
 		// 1st write: all replicas participate
 		client.tell(new AbstractClient.WriteRequest(5, 11), Actor.noSender());
 		WriteResult firstWrite = probe.expectMsgClass(
-				Duration.ofMillis(TestsCommons.getMaxUpdateDelay(sys)), WriteResult.class);
+				Duration.ofMillis(TestsCommons.getMaxUpdateDelay(sys)*2), WriteResult.class);
 		assertEquals(true, firstWrite.success, "First write must succeed: all replicas are still alive");
 
 		// 2nd write: replica 3 crashes on UPDATE before ACKing

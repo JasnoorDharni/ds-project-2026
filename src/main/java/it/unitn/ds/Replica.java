@@ -534,13 +534,8 @@ public class Replica extends AbstractReplica {
         }
         electionCurrentTarget = target;
         tell(currentElection, group.get(target));
-        cancel(electionAckTimeoutSchedule);
-        electionAckTimeoutSchedule = getContext().system().scheduler().scheduleOnce(
-                Duration.create(getMaxLatencyPlusTolerance() * 3L, TimeUnit.MILLISECONDS),
-                getSelf(),
-                new ElectionAckTimeout(target),
-                getContext().system().dispatcher(),
-                getSelf());
+        log("forwarded Election message to #"+electionCurrentTarget);
+        armElectionAckTimeout(target);
     }
 
     // Walk the ring clockwise (by sorted ID) skipping the crashed coordinator and any timed-out nodes
@@ -571,8 +566,10 @@ public class Replica extends AbstractReplica {
             // message has completed the ring; entries contain every live replica — elect the best one
             ElectionEntry winner = computeWinner(msg.entries);
             if (winner.replicaId == id) {
+                log("message completed ring, this replica is the winner");
                 becomeCoordinator();
             } else {
+                log("message completed ring, notifying winner #"+winner.replicaId);
                 tell(msg, group.get(winner.replicaId)); // let the winner know it won
             }
         } else {
@@ -620,7 +617,7 @@ public class Replica extends AbstractReplica {
         if (crashed) return;
         if (msg.targetId != electionCurrentTarget) return;
         debug("Election ACK timeout for target " + msg.targetId + ". Skipping.");
-        electionSkipped.add(msg.targetId);
+        electionSkipped.add(msg.targetId); // should we reset the nodes that are member of the election so that they know to redo the loop or not needed?
         forwardElection();
     }
 

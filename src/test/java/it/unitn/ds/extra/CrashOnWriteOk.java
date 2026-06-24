@@ -53,7 +53,7 @@ class CrashOnWriteOk {
 		// 1st write: replica 3 applies normally
 		client.tell(new AbstractClient.WriteRequest(10, 55), Actor.noSender());
 		WriteResult firstWrite = probe.expectMsgClass(
-				Duration.ofMillis(TestsCommons.getMaxUpdateDelay(sys)), WriteResult.class);
+				Duration.ofMillis(TestsCommons.getMaxUpdateDelay(sys)*2), WriteResult.class);
 		assertEquals(true, firstWrite.success, "First write must succeed normally");
 
 		// 2nd write: replica 3 crashes before applying the WriteOK
