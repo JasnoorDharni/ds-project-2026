@@ -328,6 +328,7 @@ public class Replica extends AbstractReplica {
         if (id == coordinatorId) {
             coordinatorAcceptWrite(msg.index, msg.value, getSelf(), getSender());
         } else {
+            log("forwarding write request to "+coordinatorId);
             long fId = nextForwardId++;
             pendingForwards.add(new PendingForward(fId, msg.index, msg.value, getSender()));
             tell(new ForwardWrite(msg.index, msg.value, getSender()), group.get(coordinatorId));
@@ -488,6 +489,7 @@ public class Replica extends AbstractReplica {
         if (crashed) return;
         if (inElection) return;
         if (id == coordinatorId) return;
+        log("Heartbeat timeout. Assuming coordinator " + coordinatorId + " crashed.");
         startElection(coordinatorId);
     }
 
@@ -520,6 +522,7 @@ public class Replica extends AbstractReplica {
         callbackOnElectionStarted(crashedCoordId);
         armElectionTerminationTimeout();
 
+        log("Started election for epoch " + (Math.max(currentEpoch, lastEpoch()) + 1));
         List<ElectionEntry> entries = new ArrayList<>();
         entries.add(new ElectionEntry(id, lastEpoch(), lastSeqNum()));
         currentElection = new Election(entries, crashedCoordId);
@@ -615,6 +618,7 @@ public class Replica extends AbstractReplica {
     private void onElectionAckTimeout(ElectionAckTimeout msg) {
         if (crashed) return;
         if (msg.targetId != electionCurrentTarget) return;
+        debug("Election ACK timeout for target " + msg.targetId + ". Skipping.");
         electionSkipped.add(msg.targetId);
         forwardElection();
     }
@@ -637,13 +641,16 @@ public class Replica extends AbstractReplica {
     private void onElectionTerminationTimeout(ElectionTerminationTimeout msg) {
         if (crashed) return;
         if (!inElection) return; // already resolved via SYNCHRONIZATION
+
         // Election stalled (winner likely crashed before sending SYNC); restart.
+        log("Election termination timeout. Election stalled, restarting...");
         inElection = false;
         startElection(coordinatorId);
     }
 
     private void becomeCoordinator() {
         if (id == coordinatorId && !inElection) return;
+        log("Elected as NEW COORDINATOR for epoch " + (Math.max(currentEpoch, lastEpoch()) + 1));
         coordinatorId = id;
         currentEpoch = Math.max(currentEpoch, lastEpoch()) + 1; // new epoch ensures updates are distinguishable from pre-crash ones
         sequenceNumber = 0;
@@ -677,6 +684,7 @@ public class Replica extends AbstractReplica {
 
     private void onSynchronization(Synchronization msg) {
         if (crashed) return;
+        log("Synchronized with new coordinator " + msg.newCoordId + " for epoch " + msg.newEpoch);
         coordinatorId = msg.newCoordId;
         currentEpoch = msg.newEpoch;
         sequenceNumber = 0;
@@ -717,6 +725,7 @@ public class Replica extends AbstractReplica {
         forwardTimers.clear();
         for (Cancellable c : updateTimers.values()) cancel(c);
         updateTimers.clear();
+        log("CRASHED");
     }
 
     // Called at the top of every handler that has a crash point.
