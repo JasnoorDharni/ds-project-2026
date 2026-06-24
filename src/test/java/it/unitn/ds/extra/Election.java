@@ -50,8 +50,7 @@ class Election {
 		sys.probes.get(coord).fishForMessage(Duration.ofMillis(300), "", msg -> msg instanceof Crash);
 		sys.probes.get(crash_node).fishForMessage(Duration.ofMillis(300), "", msg -> msg instanceof Crash);
 
-		// heartbeat detection (2x beat) + ring hops + ElectionAckTimeout for skipped replica 2
-		Thread.sleep(AbstractReplica.COORDINATOR_BEAT_INTERVAL * 3L + AbstractReplica.MAX_LATENCY * 20L);
+        Thread.sleep(TestsCommons.getElectionMaxDelay(sys)); // is longer than necessary but just to use provided functions
 
         // set up client to send requests to `request_node`
 		TestKit probe = new TestKit(sys.system);
@@ -81,24 +80,25 @@ class Election {
 
     /**
      * case where the elected winner crashes before broadcasting SYNC.
+     *
+     * as there are no prior messages we expect the replica with the highest ID to win the election
      */
 	@ParameterizedTest
 	@CsvSource({
 			"0,5",
-			"0,7",
-			"1,5",
-			"1,7",
+			"2,15",
+			"7,10",
 	   })
 	void crashElectedWinnerBeforeSync(int coord, int n_nodes) throws InterruptedException {
 		final TestsSystemWrapper sys = TestsCommons.createTestSystem("crashOnElection", n_nodes, coord);
 
-		sys.actors.get(coord).tell(new Crash(Crash.Type.Now, 0), Actor.noSender());
-		// sys.actors.get(2).tell(new Crash(Crash.Type.Now, 0), Actor.noSender());
-		sys.probes.get(coord).fishForMessage(Duration.ofMillis(300), "", msg -> msg instanceof Crash);
-		// sys.probes.get(2).fishForMessage(Duration.ofMillis(300), "", msg -> msg instanceof Crash);
 
-		// heartbeat detection (2x beat) + ring hops + ElectionAckTimeout for skipped replica 2
-		Thread.sleep(AbstractReplica.COORDINATOR_BEAT_INTERVAL * 3L + AbstractReplica.MAX_LATENCY * 20L);
+		sys.actors.get(coord).tell(new Crash(Crash.Type.Now, 0), Actor.noSender());
+		sys.probes.get(coord).fishForMessage(Duration.ofMillis(300), "", msg -> msg instanceof Crash);
+        // even just after handling 1 election message it can crash as that message will make the complete loop and lead to this replica winning
+		sys.actors.get(n_nodes -1).tell(new Crash(Crash.Type.Election, 1), Actor.noSender());
+
+
 
 		TestKit probe = new TestKit(sys.system);
 		ActorRef client = sys.system.actorOf(
@@ -106,12 +106,14 @@ class Election {
 						Optional.of(sys.actors.get(1)), probe.getRef()),
 				"client");
 
+		Thread.sleep(TestsCommons.getElectionMaxDelay(sys));
+
 	       // write check
 		client.tell(new AbstractClient.WriteRequest(0, 33), Actor.noSender());
 		WriteResult writeResult = probe.expectMsgClass(
 				Duration.ofMillis(TestsCommons.getMaxUpdateDelay(sys)), WriteResult.class);
 		assertEquals(true, writeResult.success,
-				"Write must succeed: the ring election skips the silent replica 2 and still elects a coordinator");
+				"Write must succeed");
 
 		Thread.sleep(TestsCommons.getBaseMaxUpdateDelay(sys));
 
