@@ -368,7 +368,7 @@ public class Replica extends AbstractReplica {
         if (id != coordinatorId) {
             cancel(updateTimers.get(k));
             Cancellable c = getContext().system().scheduler().scheduleOnce(
-                    Duration.create(getMaxLatency() * 4L, TimeUnit.MILLISECONDS),
+                    Duration.create(getMaxLatencyPlusTolerance() * 4L, TimeUnit.MILLISECONDS),
                     getSelf(),
                     new PendingWriteOkTimeoutMsg(msg.epoch, msg.seqNum),
                     getContext().system().dispatcher(),
@@ -611,27 +611,17 @@ public class Replica extends AbstractReplica {
         cancel(electionAckTimeoutSchedule);
     }
 
+    // =========================================================================
+    // Election > timeout handlers
+    // =========================================================================
+
+
     private void onElectionAckTimeout(ElectionAckTimeout msg) {
         if (crashed) return;
         if (msg.targetId != electionCurrentTarget) return;
         debug("Election ACK timeout for target " + msg.targetId + ". Skipping.");
         electionSkipped.add(msg.targetId);
         forwardElection();
-    }
-
-    // Arms a fallback timer that restarts the election if SYNCHRONIZATION never arrives.
-    // Covers the case where the elected winner crashes before broadcasting SYNC (Hint 2).
-    private void armElectionTerminationTimeout() {
-        cancel(electionTerminationTimeoutSchedule);
-        long detection = (long)(getCoordinatorBeatInterval() * 3L) + ((long) getMaxLatency() * getSystemNumberOfActors() * 2);
-        long ringHops = (long) getSystemNumberOfActors() * getMaxLatency() * 2;
-        long delay = (detection + ringHops) * 5 * 2; // 2× the expected max election duration
-        electionTerminationTimeoutSchedule = getContext().system().scheduler().scheduleOnce(
-                Duration.create(delay, TimeUnit.MILLISECONDS),
-                getSelf(),
-                new ElectionTerminationTimeout(),
-                getContext().dispatcher(),
-                getSelf());
     }
 
     private void onElectionTerminationTimeout(ElectionTerminationTimeout msg) {
@@ -643,6 +633,49 @@ public class Replica extends AbstractReplica {
         inElection = false;
         startElection(coordinatorId);
     }
+
+    // =========================================================================
+    // Election > timeout arming
+    // =========================================================================
+
+    // Arms a fallback timer that restarts the election if SYNCHRONIZATION never arrives.
+    // Covers the case where the elected winner crashes before broadcasting SYNC (Hint 2).
+    private void armElectionTerminationTimeout() {
+        cancel(electionTerminationTimeoutSchedule);
+        // time for the election to succesfully travel the entire ring 
+        long loopTime = (long) getSystemNumberOfActors() * getMaxLatencyPlusTolerance();
+        // time to detect a crashed node in the ring
+        long crashDetectTime = 3L *getMaxLatencyPlusTolerance();
+        // max number of crashes during election (from assumption of always having quorum)
+        long maxCrashes = (getSystemNumberOfActors() - 1L) /2L;
+        // node sends win notification to leader + leader sends sync message
+        long synchronizationTime = getMaxLatencyPlusTolerance()*2;
+
+        long delay = (loopTime + crashDetectTime *maxCrashes + synchronizationTime)*2; 
+
+        electionTerminationTimeoutSchedule = getContext().system().scheduler().scheduleOnce(
+                Duration.create(delay, TimeUnit.MILLISECONDS),
+                getSelf(),
+                new ElectionTerminationTimeout(),
+                getContext().dispatcher(),
+                getSelf());
+    }
+
+    private void armElectionAckTimeout(int target){
+        cancel(electionAckTimeoutSchedule);
+        electionAckTimeoutSchedule = getContext().system().scheduler().scheduleOnce(
+                // expect max delay is maxlatency * 2, using *3 adds the required margin
+                Duration.create(getMaxLatencyPlusTolerance() * 3L, TimeUnit.MILLISECONDS),
+                getSelf(),
+                new ElectionAckTimeout(target),
+                getContext().system().dispatcher(),
+                getSelf());
+    }
+
+
+    // =========================================================================
+    // Election > succesful election + synchronization
+    // =========================================================================
 
     private void becomeCoordinator() {
         if (id == coordinatorId && !inElection) return;
@@ -785,7 +818,7 @@ public class Replica extends AbstractReplica {
         cancel(forwardTimers.get(fId));
         // max latency forward + max latency update = 2x. using 4x to avoid false positives
         Cancellable c = getContext().system().scheduler().scheduleOnce(
-                Duration.create(getMaxLatency() * 4L, TimeUnit.MILLISECONDS),
+                Duration.create(getMaxLatencyPlusTolerance() * 4L, TimeUnit.MILLISECONDS),
                 getSelf(),
                 new ForwardWriteTimeoutMsg(fId),
                 getContext().system().dispatcher(),
