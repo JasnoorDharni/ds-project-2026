@@ -522,7 +522,6 @@ public class Replica extends AbstractReplica {
         callbackOnElectionStarted(crashedCoordId);
         armElectionTerminationTimeout();
 
-        log("Started election for epoch " + (Math.max(currentEpoch, lastEpoch()) + 1));
         List<ElectionEntry> entries = new ArrayList<>();
         entries.add(new ElectionEntry(id, lastEpoch(), lastSeqNum()));
         currentElection = new Election(entries, crashedCoordId);
