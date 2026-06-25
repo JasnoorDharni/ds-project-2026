@@ -370,8 +370,6 @@ public abstract class AbstractReplica extends AbstractActor {
     private final void onCrashMsg(Crash crash) {
         log("CRASH request: " + crash.type + " (" + crash.after_n_messages_of_type + ")");
         crash(crash);
-        // TODO: switch back in case it might cause issues with auto testing
-        // log("CRASHED: " + crash.type + " (" + crash.after_n_messages_of_type + ")");
         listener.ifPresent(l -> l.tell(crash, getSelf()));
     }
 

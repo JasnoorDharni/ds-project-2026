@@ -218,7 +218,6 @@ public class Replica extends AbstractReplica {
     private final List<PendingForward> pendingForwards = new ArrayList<>();
 
     // trackers for crash state, crash type, and number of messages before crash is started 
-    private boolean crashed = false;
     private Crash.Type pendingCrashType = null;
     private int pendingCrashCount = 0;
 
@@ -300,7 +299,7 @@ public class Replica extends AbstractReplica {
     }
 
     // =========================================================================
-    // Receive
+    // Receivers
     // =========================================================================
 
     @Override
@@ -326,19 +325,23 @@ public class Replica extends AbstractReplica {
                 .build();
     }
 
+    private Receive crashedReceive() {
+    return receiveBuilder()
+            .matchAny(msg -> { })
+            .build();
+    }
+
     // =========================================================================
     // Read / Write handlers
     // =========================================================================
 
     // reads are immediate, returning the value of the local replica
     private void onReadRequest(ReadRequest msg) {
-        if (crashed) return;
         tell(new ReadResponse(msg.index, positions[msg.index], id), getSender());
     }
 
     // writes are forwarded to the coordinator
     private void onWriteRequest(WriteRequest msg) {
-        if (crashed) return;
         if (id == coordinatorId) {
             coordinatorAcceptWrite(msg.index, msg.value, getSelf(), getSender());
         } else {
@@ -351,7 +354,6 @@ public class Replica extends AbstractReplica {
     }
 
     private void onForwardWrite(ForwardWrite msg) {
-        if (crashed) return;
         if (id != coordinatorId) return; // stale delivery after a leadership change; discard TODO: make sure this does not drop client write requests, if not explain it in comment here for completeness
         coordinatorAcceptWrite(msg.index, msg.value, getSender(), msg.originalClient);
     }
@@ -404,7 +406,6 @@ public class Replica extends AbstractReplica {
     }
 
     private void onAck(Ack msg) {
-        if (crashed) return;
         if (id != coordinatorId) return;
         long k = key(msg.epoch, msg.seqNum);
         Set<Integer> acks = pendingAcks.get(k);
@@ -476,7 +477,6 @@ public class Replica extends AbstractReplica {
     }
 
     private void onBroadcastHeartbeat(BroadcastHeartbeat msg) {
-        if (crashed) return;
         if (id != coordinatorId) return;
         sendHeartbeats();
         scheduleNextHeartbeat();
@@ -500,7 +500,6 @@ public class Replica extends AbstractReplica {
     }
 
     private void onHeartbeatTimeout(HeartbeatTimeout msg) {
-        if (crashed) return;
         if (inElection) return;
         if (id == coordinatorId) return;
         log("Heartbeat timeout. Assuming coordinator " + coordinatorId + " crashed.");
@@ -508,7 +507,7 @@ public class Replica extends AbstractReplica {
     }
 
     private void onForwardWriteTimeout(ForwardWriteTimeoutMsg msg) {
-        if (crashed || inElection) return;
+        if (inElection) return;
         if (forwardTimers.remove(msg.forwardId) != null) {
             log("Timeout waiting for UPDATE after ForwardWrite. Assuming coordinator crash.");
             armStaggeredElectionStartTimeout(coordinatorId,0);
@@ -516,7 +515,7 @@ public class Replica extends AbstractReplica {
     }
 
     private void onPendingWriteOkTimeout(PendingWriteOkTimeoutMsg msg) {
-        if (crashed || inElection) return;
+        if (inElection) return;
         long k = key(msg.epoch, msg.seqNum);
         if (updateTimers.remove(k) != null) {
             log("Timeout waiting for WRITEOK. Assuming coordinator crash.");
@@ -542,7 +541,6 @@ public class Replica extends AbstractReplica {
 
 
     private void onStaggeredElectionStartTimeout(StaggeredElectionStartTimeout msg) {
-        if (crashed) return;
         log("Starting election after random timeout...");
         startElection(msg.crashedCoordId);
     }
@@ -645,7 +643,6 @@ public class Replica extends AbstractReplica {
     }
 
     private void onElectionAck(ElectionAck msg) {
-        if (crashed) return;
         // ignore late ACKs from hops already skipped: they would otherwise cancel
         // the timeout armed for the new (current) target and stall the election
         if (msg.replicaId != electionCurrentTarget) return;
@@ -658,7 +655,6 @@ public class Replica extends AbstractReplica {
 
 
     private void onElectionAckTimeout(ElectionAckTimeout msg) {
-        if (crashed) return;
         if (msg.targetId != electionCurrentTarget) return;
         debug("Election ACK timeout for target " + msg.targetId + ". Skipping.");
         electionSkipped.add(msg.targetId); // should we reset the nodes that are member of the election so that they know to redo the loop or not needed?
@@ -666,7 +662,6 @@ public class Replica extends AbstractReplica {
     }
 
     private void onElectionTerminationTimeout(ElectionTerminationTimeout msg) {
-        if (crashed) return;
         if (!inElection) return; // already resolved via SYNCHRONIZATION
 
         // Election stalled (winner likely crashed before sending SYNC); restart.
@@ -752,7 +747,6 @@ public class Replica extends AbstractReplica {
     }
 
     private void onSynchronization(Synchronization msg) {
-        if (crashed) return;
         log("Synchronized with new coordinator " + msg.newCoordId + " for epoch " + msg.newEpoch);
         coordinatorId = msg.newCoordId;
         currentEpoch = msg.newEpoch;
@@ -785,7 +779,7 @@ public class Replica extends AbstractReplica {
     // =========================================================================
 
     private void applyCrashNow() {
-        crashed = true;
+        // timer messages would not be handled anyway but we still cancel them
         cancel(heartbeatSchedule);
         cancel(heartbeatTimeoutSchedule);
         cancel(electionAckTimeoutSchedule);
@@ -795,12 +789,12 @@ public class Replica extends AbstractReplica {
         for (Cancellable c : updateTimers.values()) cancel(c);
         updateTimers.clear();
         log("CRASHED");
+        getContext().become(crashedReceive());
     }
 
     // Called at the top of every handler that has a crash point.
     // Returns true (and crashes) BEFORE the message is processed, so the Nth message is never handled.
     private boolean checkAndApplyCrash(Crash.Type type) {
-        if (crashed) return true;
         if (pendingCrashType == type) {
             if (pendingCrashCount <= 0) {
                 pendingCrashType = null;
