@@ -1,18 +1,22 @@
 package it.unitn.ds.extra;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 import java.time.Duration;
 import java.util.Optional;
 
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import akka.actor.Actor;
 import akka.actor.ActorRef;
+import akka.io.Tcp.Write;
 import akka.testkit.javadsl.TestKit;
 import it.unitn.ds.AbstractClient;
 import it.unitn.ds.AbstractClient.ReadResult;
+import it.unitn.ds.AbstractClient.WriteRequest;
 import it.unitn.ds.AbstractClient.WriteResult;
 import it.unitn.ds.AbstractReplica.Crash;
 import it.unitn.ds.Client;
@@ -67,4 +71,34 @@ class Election {
 
 		sys.system.terminate();
 	}
+
+    // quorum is 2 because there are 2 replicas, so the writes cannot reach quorum
+	@ParameterizedTest
+	@CsvSource({
+			"0,2",
+			"1,2",
+	   })
+	void lastReplicaStanding(int coord, int n_nodes) throws InterruptedException {
+		final TestsSystemWrapper sys = TestsCommons.createTestSystem("crashOnElection", n_nodes, coord);
+
+
+		sys.actors.get(0).tell(new Crash(Crash.Type.Now, 0), Actor.noSender());
+		sys.probes.get(0).fishForMessage(Duration.ofMillis(300), "", msg -> msg instanceof Crash);
+
+
+		TestKit probe = new TestKit(sys.system);
+		ActorRef client = sys.system.actorOf(
+				Client.propsWithListener(sys.client_read_timeout, sys.client_write_timeout,
+						Optional.of(sys.actors.get(1)), probe.getRef()),
+				"client");
+
+		Thread.sleep(TestsCommons.getElectionMaxDelay(sys));
+
+		client.tell(new AbstractClient.WriteRequest(0, 33), Actor.noSender());
+
+		probe.expectNoMessage(Duration.ofMillis(TestsCommons.getMaxUpdateDelay(sys)));
+
+		sys.system.terminate();
+	}
+
 }
