@@ -286,7 +286,7 @@ public class Replica extends AbstractReplica {
     // this is handleCrashRequest basically
     @Override
     public void crash(Crash how) {
-        if ((how.type == Crash.Type.Now) || (pendingCrashCount <= 0) ){
+        if ((how.type == Crash.Type.Now) || (how.after_n_messages_of_type <= 0) ){
             applyCrashNow();
         } else {
             pendingCrashType = how.type;
@@ -310,11 +310,14 @@ public class Replica extends AbstractReplica {
                 .match(Heartbeat.class, this::onHeartbeat)
                 .match(BroadcastHeartbeat.class, this::onBroadcastHeartbeat)
                 .match(HeartbeatTimeout.class, this::onHeartbeatTimeout)
-                .match(Election.class, this::onElection)
-                .match(ElectionAck.class, this::onElectionAck)
-                .match(ElectionAckTimeout.class, this::onElectionAckTimeout)
-                .match(ElectionTerminationTimeout.class, this::onElectionTerminationTimeout)
-                .match(Synchronization.class, this::onSynchronization)
+                .match(Election.class, msg -> { 
+                    becomeElectionReceiver(msg.crashedCoordId);
+                    this.onElection(msg); 
+                } )
+                .match(ElectionAck.class, x -> {})
+                .match(ElectionAckTimeout.class, x -> {})
+                .match(ElectionTerminationTimeout.class, x -> {})
+                .match(Synchronization.class, x -> {})
                 .match(ForwardWriteTimeoutMsg.class, this::onForwardWriteTimeout)
                 .match(PendingWriteOkTimeoutMsg.class, this::onPendingWriteOkTimeout)
                 .match(StaggeredElectionStartTimeout.class, this::onStaggeredElectionStartTimeout)
@@ -347,6 +350,19 @@ public class Replica extends AbstractReplica {
     return receiveBuilder()
             .matchAny(msg -> { })
             .build();
+    }
+
+    // =========================================================================
+    // Receivers > receiver switching helpers
+    // =========================================================================
+    
+    private void becomeElectionReceiver(int crashedCoordId){
+        getContext().become(electionReceive());
+        callbackOnElectionStarted(crashedCoordId);
+        armElectionTerminationTimeout();
+        // TODO: see if there is need for this resets or they can be done on the end of previous election
+        electionSkipped.clear();
+        electionSkipped.add(crashedCoordId);
     }
 
     // =========================================================================
@@ -461,7 +477,6 @@ public class Replica extends AbstractReplica {
         positions[u.index] = u.value;
         updateHistory.add(u);
         pendingUpdates.remove(key(u.epoch, u.seqNum));
-        log("applied update " + u.epoch + ":" + u.seqNum + " (" + u.index + ", " + u.value + ")");
         callbackOnUpdateApplied(u.index, u.value);
         if (u.originReplica.equals(getSelf())) {
             tell(new WriteResponse(true, u.index, u.value, id), u.originClient);
@@ -556,7 +571,6 @@ public class Replica extends AbstractReplica {
     // Election > Staggered Start 
     // =========================================================================
 
-    // replicas that notice coordinator crash through heartbeats will pass delay = id*getMaxLatencyPlusTolerance, replicas that notice through write attemps will pass 0
     private void armStaggeredElectionStartTimeout(int crashedCoordId){
         cancel(staggeredElectionStartSchedule);
         long delay = id * getMaxLatencyPlusTolerance();
@@ -568,19 +582,13 @@ public class Replica extends AbstractReplica {
                 getSelf());
     }
 
-
     private void onStaggeredElectionStartTimeout(StaggeredElectionStartTimeout msg) {
         log("Starting election after random timeout...");
         startElection(msg.crashedCoordId);
     }
 
-
     private void startElection(int crashedCoordId) {
-        inElection = true;
-        electionSkipped.clear();
-        electionSkipped.add(crashedCoordId);
-        callbackOnElectionStarted(crashedCoordId);
-        armElectionTerminationTimeout();
+        becomeElectionReceiver(crashedCoordId);
 
         List<ElectionEntry> entries = new ArrayList<>();
         entries.add(new ElectionEntry(id, lastEpoch(), lastSeqNum()));
@@ -623,6 +631,7 @@ public class Replica extends AbstractReplica {
 
     private void onElection(Election msg) {
         // avoid starting another election while still forwarding the current one
+        // TODO: could ignore staggeredelectionstart in election state instead
         cancel(staggeredElectionStartSchedule);
 
         tell(new ElectionAck(id), getSender());
@@ -643,13 +652,6 @@ public class Replica extends AbstractReplica {
                 tell(msg, group.get(winner.replicaId)); // let the winner know it won
             }
         } else {
-            if (!inElection) {
-                inElection = true;
-                electionSkipped.clear();
-                electionSkipped.add(msg.crashedCoordId);
-                callbackOnElectionStarted(msg.crashedCoordId);
-                armElectionTerminationTimeout();
-            }
             List<ElectionEntry> newEntries = new ArrayList<>(msg.entries);
             newEntries.add(new ElectionEntry(id, lastEpoch(), lastSeqNum()));
             currentElection = new Election(newEntries, msg.crashedCoordId);
@@ -691,8 +693,6 @@ public class Replica extends AbstractReplica {
     }
 
     private void onElectionTerminationTimeout(ElectionTerminationTimeout msg) {
-        if (!inElection) return; // already resolved via SYNCHRONIZATION
-
         // Election stalled (winner likely crashed before sending SYNC); restart.
         log("Election termination timeout. Election stalled, restarting...");
         inElection = false;
@@ -747,7 +747,7 @@ public class Replica extends AbstractReplica {
         coordinatorId = id;
         currentEpoch = Math.max(currentEpoch, lastEpoch()) + 1; // new epoch ensures updates are distinguishable from pre-crash ones
         sequenceNumber = 0;
-        inElection = false;
+        getContext().become(createReceive());
         cancel(heartbeatTimeoutSchedule);
         cancel(electionAckTimeoutSchedule);
         cancel(electionTerminationTimeoutSchedule);
@@ -780,7 +780,8 @@ public class Replica extends AbstractReplica {
         coordinatorId = msg.newCoordId;
         currentEpoch = msg.newEpoch;
         sequenceNumber = 0;
-        inElection = false;
+        getContext().become(createReceive());
+
         cancel(electionAckTimeoutSchedule);
         cancel(electionTerminationTimeoutSchedule);
         for (Cancellable c : forwardTimers.values()) cancel(c);
