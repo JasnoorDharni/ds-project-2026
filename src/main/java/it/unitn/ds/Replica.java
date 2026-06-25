@@ -762,6 +762,10 @@ public class Replica extends AbstractReplica {
         inElection = false;
         cancel(electionAckTimeoutSchedule);
         cancel(electionTerminationTimeoutSchedule);
+        for (Cancellable c : forwardTimers.values()) cancel(c);
+            forwardTimers.clear();
+        for (Cancellable c : updateTimers.values()) cancel(c);
+            updateTimers.clear();
         // Catch-up: route every missed update through applyUpdate so that
         //  - WriteResponse is sent to the client if this replica was the origin
         //    (otherwise the client would time out for an actually-committed write)
