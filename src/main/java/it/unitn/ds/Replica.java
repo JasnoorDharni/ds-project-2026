@@ -452,7 +452,6 @@ public class Replica extends AbstractReplica {
                 }
             }
         }
-        checkAndApplyCrash(Crash.Type.Update);
     }
 
     // =========================================================================
@@ -499,7 +498,7 @@ public class Replica extends AbstractReplica {
     private void onHeartbeat(Heartbeat msg) {
         if (id == coordinatorId) return;
         scheduleHeartbeatTimeout();
-        checkAndApplyCrash(Crash.Type.Update);
+        checkAndApplyCrash(Crash.Type.Heartbeat);
     }
 
     private void onHeartbeatTimeout(HeartbeatTimeout msg) {
@@ -634,7 +633,7 @@ public class Replica extends AbstractReplica {
             currentElection = new Election(newEntries, msg.crashedCoordId);
             forwardElection();
         }
-        checkAndApplyCrash(Crash.Type.Update);
+        checkAndApplyCrash(Crash.Type.Election);
     }
 
     // Priority: highest epoch → highest seqNum → highest id (tiebreaker)
@@ -805,7 +804,7 @@ public class Replica extends AbstractReplica {
     }
 
     // Called at the top of every handler that has a crash point.
-    // Returns true (and crashes) BEFORE the message is processed, so the Nth message is never handled.
+    // crashes start exactly after the nth message has been handled
     private boolean checkAndApplyCrash(Crash.Type type) {
         if (pendingCrashType == type) {
             pendingCrashCount--;
