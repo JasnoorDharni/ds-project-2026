@@ -327,7 +327,7 @@ public class Replica extends AbstractReplica {
                 .match(WriteRequest.class, this::onWriteRequest)
                 .match(ForwardWrite.class, this::onForwardWrite)
                 .match(Update.class, this::onUpdate)
-                .match(Ack.class, this::onAck)
+                .match(UpdateAck.class, this::onUpdateAck)
                 .match(WriteOk.class, this::onWriteOk)
                 .match(Heartbeat.class, x -> {})
                 .match(BroadcastHeartbeat.class, x -> {})
@@ -526,7 +526,7 @@ public class Replica extends AbstractReplica {
     private void onHeartbeatTimeout(HeartbeatTimeout msg) {
         if (id == coordinatorId) return;
         log("Heartbeat timeout. Assuming coordinator " + coordinatorId + " crashed.");
-        armStaggeredElectionStartTimeout(coordinatorId,id * getMaxLatencyPlusTolerance());
+        armStaggeredElectionStartTimeout(coordinatorId);
     }
 
 
@@ -534,10 +534,12 @@ public class Replica extends AbstractReplica {
     // Other Timeouts
     // =========================================================================
 
+    // this and the next timeout instantly start election instead of using the staggered approach,
+    // as this timeout happens to individual replicas and not all at once like with the heartbeat
     private void onForwardWriteTimeout(ForwardWriteTimeoutMsg msg) {
         if (forwardTimers.remove(msg.forwardId) != null) {
             log("Timeout waiting for UPDATE after ForwardWrite. Assuming coordinator crash.");
-            armStaggeredElectionStartTimeout(coordinatorId,0);
+            startElection(coordinatorId);
         }
     }
 
@@ -545,7 +547,7 @@ public class Replica extends AbstractReplica {
         long k = key(msg.epoch, msg.seqNum);
         if (updateTimers.remove(k) != null) {
             log("Timeout waiting for WRITEOK. Assuming coordinator crash.");
-            armStaggeredElectionStartTimeout(coordinatorId,0);
+            startElection(coordinatorId);
         }
     }
 
@@ -555,8 +557,9 @@ public class Replica extends AbstractReplica {
     // =========================================================================
 
     // replicas that notice coordinator crash through heartbeats will pass delay = id*getMaxLatencyPlusTolerance, replicas that notice through write attemps will pass 0
-    private void armStaggeredElectionStartTimeout(int crashedCoordId, long delay){
+    private void armStaggeredElectionStartTimeout(int crashedCoordId){
         cancel(staggeredElectionStartSchedule);
+        long delay = id * getMaxLatencyPlusTolerance();
         staggeredElectionStartSchedule = getContext().system().scheduler().scheduleOnce(
                 Duration.create(delay, TimeUnit.MILLISECONDS),
                 getSelf(),
@@ -693,7 +696,7 @@ public class Replica extends AbstractReplica {
         // Election stalled (winner likely crashed before sending SYNC); restart.
         log("Election termination timeout. Election stalled, restarting...");
         inElection = false;
-        armStaggeredElectionStartTimeout(coordinatorId,id * getMaxLatencyPlusTolerance());
+        armStaggeredElectionStartTimeout(coordinatorId);
     }
 
     // =========================================================================
