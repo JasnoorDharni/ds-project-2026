@@ -231,8 +231,6 @@ public class Replica extends AbstractReplica {
     private final Map<Long, Cancellable> forwardTimers = new HashMap<>();
     private final Map<Long, Cancellable> updateTimers = new HashMap<>();
 
-    // Guards against starting a second election while one is already in progress.
-    private boolean inElection = false;
     private Election currentElection;
     // Crashed coordinator plus any ring-hop targets that timed out in the current election round.
     private final Set<Integer> electionSkipped = new HashSet<>();
@@ -311,7 +309,7 @@ public class Replica extends AbstractReplica {
                 .match(BroadcastHeartbeat.class, this::onBroadcastHeartbeat)
                 .match(HeartbeatTimeout.class, this::onHeartbeatTimeout)
                 .match(Election.class, msg -> { 
-                    becomeElectionReceiver(msg.crashedCoordId);
+                    switchToElectionReceiver(msg.crashedCoordId);
                     this.onElection(msg); 
                 } )
                 .match(ElectionAck.class, x -> {})
@@ -356,13 +354,30 @@ public class Replica extends AbstractReplica {
     // Receivers > receiver switching helpers
     // =========================================================================
     
-    private void becomeElectionReceiver(int crashedCoordId){
+    private void switchToElectionReceiver(int crashedCoordId){
         getContext().become(electionReceive());
         callbackOnElectionStarted(crashedCoordId);
         armElectionTerminationTimeout();
         // TODO: see if there is need for this resets or they can be done on the end of previous election
         electionSkipped.clear();
         electionSkipped.add(crashedCoordId);
+    }
+
+    private void switchToStandardState(int newCoordinatorId, int newEpoch){
+        getContext().become(createReceive());
+        sequenceNumber = 0;
+        currentEpoch = newEpoch;
+        coordinatorId = newCoordinatorId;
+
+        cancel(heartbeatTimeoutSchedule);
+        cancel(electionAckTimeoutSchedule);
+        cancel(electionTerminationTimeoutSchedule);// TODO: reason if needed in all cases
+        for (Cancellable c : forwardTimers.values()) cancel(c);
+        forwardTimers.clear();
+        for (Cancellable c : updateTimers.values()) cancel(c);
+        updateTimers.clear();
+
+        // TODO: clear election stuff here
     }
 
     // =========================================================================
@@ -588,7 +603,7 @@ public class Replica extends AbstractReplica {
     }
 
     private void startElection(int crashedCoordId) {
-        becomeElectionReceiver(crashedCoordId);
+        switchToElectionReceiver(crashedCoordId);
 
         List<ElectionEntry> entries = new ArrayList<>();
         entries.add(new ElectionEntry(id, lastEpoch(), lastSeqNum()));
@@ -743,15 +758,11 @@ public class Replica extends AbstractReplica {
     // =========================================================================
 
     private void becomeCoordinator() {
-        if (id == coordinatorId && !inElection) return;
-        coordinatorId = id;
-        currentEpoch = Math.max(currentEpoch, lastEpoch()) + 1; // new epoch ensures updates are distinguishable from pre-crash ones
-        sequenceNumber = 0;
-        getContext().become(createReceive());
-        cancel(heartbeatTimeoutSchedule);
-        cancel(electionAckTimeoutSchedule);
-        cancel(electionTerminationTimeoutSchedule);
+        if (id == coordinatorId) return;// TODO: wtf
+                                        
         callbackOnCoordinatorElected(id);
+        switchToStandardState(coordinatorId, Math.max(currentEpoch, lastEpoch()) + 1);// new epoch ensures updates are distinguishable from pre-crash ones
+                                                                                      //
         // Hint 3: commit any updates the old coordinator may have applied before crashing
         // (received UPDATE + sent ACK, but WRITEOK never arrived). Applying them here ensures
         // they appear in the SYNCHRONIZATION history, satisfying uniform agreement.
@@ -763,10 +774,6 @@ public class Replica extends AbstractReplica {
             }
         }
         broadcastToOthers(new Synchronization(id, currentEpoch, updateHistory));
-        for (Cancellable c : forwardTimers.values()) cancel(c);
-        forwardTimers.clear();
-        for (Cancellable c : updateTimers.values()) cancel(c);
-        updateTimers.clear();
         sendHeartbeats();
         scheduleNextHeartbeat();
         // replay writes that arrived during the election so they are not lost
@@ -777,17 +784,9 @@ public class Replica extends AbstractReplica {
 
     private void onSynchronization(Synchronization msg) {
         log("Synchronized with new coordinator " + msg.newCoordId + " for epoch " + msg.newEpoch);
-        coordinatorId = msg.newCoordId;
-        currentEpoch = msg.newEpoch;
-        sequenceNumber = 0;
-        getContext().become(createReceive());
 
-        cancel(electionAckTimeoutSchedule);
-        cancel(electionTerminationTimeoutSchedule);
-        for (Cancellable c : forwardTimers.values()) cancel(c);
-            forwardTimers.clear();
-        for (Cancellable c : updateTimers.values()) cancel(c);
-            updateTimers.clear();
+        switchToStandardState(msg.newCoordId,msg.newEpoch);
+
         // Catch-up: route every missed update through applyUpdate so that
         //  - WriteResponse is sent to the client if this replica was the origin
         //    (otherwise the client would time out for an actually-committed write)
