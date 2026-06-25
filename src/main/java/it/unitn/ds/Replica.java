@@ -283,18 +283,14 @@ public class Replica extends AbstractReplica {
         }
     }
 
+    // this is handleCrashRequest basically
     @Override
     public void crash(Crash how) {
-        if (how.type == Crash.Type.Now) {
+        if ((how.type == Crash.Type.Now) || (pendingCrashCount <= 0) ){
             applyCrashNow();
         } else {
             pendingCrashType = how.type;
             pendingCrashCount = how.after_n_messages_of_type;
-            // after_n=0 means "crash immediately on next message of that type"; handle it like Now
-            if (pendingCrashCount <= 0) {
-                pendingCrashType = null;
-                applyCrashNow();
-            }
         }
     }
 
@@ -376,7 +372,6 @@ public class Replica extends AbstractReplica {
     }
 
     private void onUpdate(Update msg) {
-        if (checkAndApplyCrash(Crash.Type.Update)) return;
         long k = key(msg.epoch, msg.seqNum);
         if (!pendingUpdates.containsKey(k)) {
             pendingUpdates.put(k, msg);
@@ -403,6 +398,7 @@ public class Replica extends AbstractReplica {
         }
 
         tell(new Ack(msg.epoch, msg.seqNum), getSender());
+        checkAndApplyCrash(Crash.Type.Update);
     }
 
     private void onAck(Ack msg) {
@@ -428,7 +424,6 @@ public class Replica extends AbstractReplica {
     }
 
     private void onWriteOk(WriteOk msg) {
-        if (checkAndApplyCrash(Crash.Type.WriteOK)) return;
         long k = key(msg.epoch, msg.seqNum);
         Update u = pendingUpdates.get(k);
         if (u == null) return;
@@ -454,10 +449,11 @@ public class Replica extends AbstractReplica {
                 }
             }
         }
+        checkAndApplyCrash(Crash.Type.Update);
     }
 
     // =========================================================================
-    // Heartbeat
+    // Heartbeat > Coordinator
     // =========================================================================
 
     private void sendHeartbeats() {
@@ -482,6 +478,10 @@ public class Replica extends AbstractReplica {
         scheduleNextHeartbeat();
     }
 
+    // =========================================================================
+    // Heartbeat > Other Replicas
+    // =========================================================================
+
     private void scheduleHeartbeatTimeout() {
         cancel(heartbeatTimeoutSchedule);
         // 2× beat interval: one full interval for the coordinator to send + one for max network latency
@@ -494,9 +494,9 @@ public class Replica extends AbstractReplica {
     }
 
     private void onHeartbeat(Heartbeat msg) {
-        if (checkAndApplyCrash(Crash.Type.Heartbeat)) return;
         if (id == coordinatorId) return;
         scheduleHeartbeatTimeout();
+        checkAndApplyCrash(Crash.Type.Update);
     }
 
     private void onHeartbeatTimeout(HeartbeatTimeout msg) {
@@ -505,6 +505,11 @@ public class Replica extends AbstractReplica {
         log("Heartbeat timeout. Assuming coordinator " + coordinatorId + " crashed.");
         armStaggeredElectionStartTimeout(coordinatorId,id * getMaxLatencyPlusTolerance());
     }
+
+
+    // =========================================================================
+    // Other Timeouts
+    // =========================================================================
 
     private void onForwardWriteTimeout(ForwardWriteTimeoutMsg msg) {
         if (inElection) return;
@@ -596,7 +601,6 @@ public class Replica extends AbstractReplica {
         // avoid starting another election while still forwarding the current one
         cancel(staggeredElectionStartSchedule);
 
-        if (checkAndApplyCrash(Crash.Type.Election)) return;
         tell(new ElectionAck(id), getSender());
 
         boolean alreadyInRing = false;
@@ -627,6 +631,7 @@ public class Replica extends AbstractReplica {
             currentElection = new Election(newEntries, msg.crashedCoordId);
             forwardElection();
         }
+        checkAndApplyCrash(Crash.Type.Update);
     }
 
     // Priority: highest epoch → highest seqNum → highest id (tiebreaker)
@@ -796,12 +801,11 @@ public class Replica extends AbstractReplica {
     // Returns true (and crashes) BEFORE the message is processed, so the Nth message is never handled.
     private boolean checkAndApplyCrash(Crash.Type type) {
         if (pendingCrashType == type) {
+            pendingCrashCount--;
             if (pendingCrashCount <= 0) {
-                pendingCrashType = null;
                 applyCrashNow();
                 return true;
             }
-            pendingCrashCount--;
         }
         return false;
     }
