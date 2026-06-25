@@ -362,7 +362,13 @@ public class Replica extends AbstractReplica {
         electionSkipped.clear();
         electionSkipped.add(crashedCoordId);
 
-        //TODO: should we also cancel some timers (consider that we could be called both from election state and standard)
+        // cancel non election-related timers even though their messages are ignored by the receiver
+        cancel(heartbeatSchedule);
+        cancel(heartbeatTimeoutSchedule);
+        for (Cancellable c : forwardTimers.values()) cancel(c);
+        forwardTimers.clear();
+        for (Cancellable c : updateTimers.values()) cancel(c);
+        updateTimers.clear();
     }
 
     private void switchToStandardState(int newCoordinatorId, int newEpoch){
@@ -371,7 +377,7 @@ public class Replica extends AbstractReplica {
         currentEpoch = newEpoch;
         coordinatorId = newCoordinatorId;
 
-        cancel(heartbeatTimeoutSchedule);
+        // cancel election-related timers
         cancel(electionAckTimeoutSchedule);
         cancel(electionTerminationTimeoutSchedule);
         for (Cancellable c : forwardTimers.values()) cancel(c);

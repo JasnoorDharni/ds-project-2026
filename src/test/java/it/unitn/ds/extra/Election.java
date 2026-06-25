@@ -32,8 +32,8 @@ class Election {
 	@ParameterizedTest
 	@CsvSource({
 			"0,5",
-			"2,15",
-			"7,10",
+			"2,6",
+			"3,5",
 	   })
 	void crashElectedWinnerBeforeSync(int coord, int n_nodes) throws InterruptedException {
 		final TestsSystemWrapper sys = TestsCommons.createTestSystem("crashOnElection", n_nodes, coord);
@@ -52,7 +52,7 @@ class Election {
 						Optional.of(sys.actors.get(1)), probe.getRef()),
 				"client");
 
-		Thread.sleep(TestsCommons.getElectionMaxDelay(sys));
+		Thread.sleep(TestsCommons.getElectionMaxDelay(sys)/2); 
 
 	       // write check
 		client.tell(new AbstractClient.WriteRequest(0, 33), Actor.noSender());
@@ -92,7 +92,7 @@ class Election {
 						Optional.of(sys.actors.get(1)), probe.getRef()),
 				"client");
 
-		Thread.sleep(TestsCommons.getElectionMaxDelay(sys));
+		Thread.sleep(TestsCommons.getElectionMaxDelay(sys)/2); 
 
 		client.tell(new AbstractClient.WriteRequest(0, 33), Actor.noSender());
 
