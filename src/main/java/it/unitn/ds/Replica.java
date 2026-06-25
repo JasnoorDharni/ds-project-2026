@@ -358,9 +358,11 @@ public class Replica extends AbstractReplica {
         getContext().become(electionReceive());
         callbackOnElectionStarted(crashedCoordId);
         armElectionTerminationTimeout();
-        // TODO: see if there is need for this resets or they can be done on the end of previous election
+
         electionSkipped.clear();
         electionSkipped.add(crashedCoordId);
+
+        //TODO: should we also delete some timers (consider that we could be called both from election state and standard)
     }
 
     private void switchToStandardState(int newCoordinatorId, int newEpoch){
@@ -371,13 +373,11 @@ public class Replica extends AbstractReplica {
 
         cancel(heartbeatTimeoutSchedule);
         cancel(electionAckTimeoutSchedule);
-        cancel(electionTerminationTimeoutSchedule);// TODO: reason if needed in all cases
+        cancel(electionTerminationTimeoutSchedule);
         for (Cancellable c : forwardTimers.values()) cancel(c);
         forwardTimers.clear();
         for (Cancellable c : updateTimers.values()) cancel(c);
         updateTimers.clear();
-
-        // TODO: clear election stuff here
     }
 
     // =========================================================================
@@ -597,6 +597,9 @@ public class Replica extends AbstractReplica {
                 getSelf());
     }
 
+    // this method can be called both in normal and election state
+    // NOTE: crashedCoordId referes to the old coordinator that the crashed,
+    // not to the newly elected one, but this makes no difference during election
     private void onStaggeredElectionStartTimeout(StaggeredElectionStartTimeout msg) {
         log("Starting election after random timeout...");
         startElection(msg.crashedCoordId);
@@ -710,7 +713,6 @@ public class Replica extends AbstractReplica {
     private void onElectionTerminationTimeout(ElectionTerminationTimeout msg) {
         // Election stalled (winner likely crashed before sending SYNC); restart.
         log("Election termination timeout. Election stalled, restarting...");
-        inElection = false;
         armStaggeredElectionStartTimeout(coordinatorId);
     }
 
@@ -761,7 +763,7 @@ public class Replica extends AbstractReplica {
         if (id == coordinatorId) return;// TODO: wtf
                                         
         callbackOnCoordinatorElected(id);
-        switchToStandardState(coordinatorId, Math.max(currentEpoch, lastEpoch()) + 1);// new epoch ensures updates are distinguishable from pre-crash ones
+        switchToStandardState(id, Math.max(currentEpoch, lastEpoch()) + 1);// new epoch ensures updates are distinguishable from pre-crash ones
                                                                                       //
         // Hint 3: commit any updates the old coordinator may have applied before crashing
         // (received UPDATE + sent ACK, but WRITEOK never arrived). Applying them here ensures
