@@ -31,7 +31,6 @@ dependencies {
 
 test {
 	useJUnitPlatform()
-    maxParallelForks = (int) (Runtime.runtime.availableProcessors() / 2 + 1)
 	testLogging {
         // showStandardStreams = true  
 		events "passed", "skipped", "failed"

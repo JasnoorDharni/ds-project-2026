@@ -329,7 +329,7 @@ public class Replica extends AbstractReplica {
                 .match(ForwardWrite.class, this::onForwardWrite)
                 .match(Update.class, this::onUpdate)
                 .match(UpdateAck.class, this::onUpdateAck)
-                .match(WriteOk.class, this::onWriteOk)
+                .match(WriteOk.class, x -> {}) // Hint 1: avoid applying updates during an election
                 .match(Heartbeat.class, x -> {})
                 .match(BroadcastHeartbeat.class, x -> {})
                 .match(HeartbeatTimeout.class, x -> {} )
@@ -362,7 +362,7 @@ public class Replica extends AbstractReplica {
         electionSkipped.clear();
         electionSkipped.add(crashedCoordId);
 
-        //TODO: should we also delete some timers (consider that we could be called both from election state and standard)
+        //TODO: should we also cancel some timers (consider that we could be called both from election state and standard)
     }
 
     private void switchToStandardState(int newCoordinatorId, int newEpoch){
@@ -649,7 +649,6 @@ public class Replica extends AbstractReplica {
 
     private void onElection(Election msg) {
         // avoid starting another election while still forwarding the current one
-        // TODO: could ignore staggeredelectionstart in election state instead
         cancel(staggeredElectionStartSchedule);
 
         tell(new ElectionAck(id), getSender());
@@ -760,11 +759,9 @@ public class Replica extends AbstractReplica {
     // =========================================================================
 
     private void becomeCoordinator() {
-        if (id == coordinatorId) return;// TODO: wtf
-                                        
         callbackOnCoordinatorElected(id);
         switchToStandardState(id, Math.max(currentEpoch, lastEpoch()) + 1);// new epoch ensures updates are distinguishable from pre-crash ones
-                                                                                      //
+                                                                                      
         // Hint 3: commit any updates the old coordinator may have applied before crashing
         // (received UPDATE + sent ACK, but WRITEOK never arrived). Applying them here ensures
         // they appear in the SYNCHRONIZATION history, satisfying uniform agreement.
@@ -862,8 +859,27 @@ public class Replica extends AbstractReplica {
         }
     }
 
+    // private Update lastUpdate() {
+    //     return updateHistory.isEmpty() ? null : updateHistory.get(updateHistory.size() - 1);
+    // }
+
+    // compute the last known update, considers both commited updates and pending ones
     private Update lastUpdate() {
-        return updateHistory.isEmpty() ? null : updateHistory.get(updateHistory.size() - 1);
+        Update lastApplied = updateHistory.isEmpty() ? null : updateHistory.get(updateHistory.size() - 1);
+        Update lastKnown = lastApplied;
+
+        for (Update u : pendingUpdates.values()) {
+            if (lastKnown == null) {
+                lastKnown = u;
+            } else {
+                // Compare updates lexicographically by epoch, then sequence number
+                if (u.epoch > lastKnown.epoch || 
+                   (u.epoch == lastKnown.epoch && u.seqNum > lastKnown.seqNum)) {
+                    lastKnown = u;
+                }
+            }
+        }
+        return lastKnown;
     }
 
     private int lastEpoch() { Update u = lastUpdate(); return u == null ? -1 : u.epoch; }
