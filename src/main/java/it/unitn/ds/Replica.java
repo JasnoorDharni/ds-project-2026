@@ -89,10 +89,10 @@ public class Replica extends AbstractReplica {
 
     // Replica → coordinator (2PC phase 1 reply): signals that the replica stored the UPDATE
     // and is ready to commit; counted by the coordinator towards the quorum.
-    public static class Ack implements Serializable {
+    public static class UpdateAck implements Serializable {
         public final int epoch;
         public final int seqNum;
-        public Ack(int epoch, int seqNum) { this.epoch = epoch; this.seqNum = seqNum; }
+        public UpdateAck(int epoch, int seqNum) { this.epoch = epoch; this.seqNum = seqNum; }
     }
 
     // Coordinator → all replicas (2PC phase 2): commit order for the update identified by
@@ -305,7 +305,7 @@ public class Replica extends AbstractReplica {
                 .match(WriteRequest.class, this::onWriteRequest)
                 .match(ForwardWrite.class, this::onForwardWrite)
                 .match(Update.class, this::onUpdate)
-                .match(Ack.class, this::onAck)
+                .match(UpdateAck.class, this::onUpdateAck)
                 .match(WriteOk.class, this::onWriteOk)
                 .match(Heartbeat.class, this::onHeartbeat)
                 .match(BroadcastHeartbeat.class, this::onBroadcastHeartbeat)
@@ -387,6 +387,7 @@ public class Replica extends AbstractReplica {
         pendingAcks.put(k, acks);
         broadcastToOthers(update);
         // if quorum already met (single replica): commit immediately without waiting for external ACKs (otherwise we would be waiting forever for another ACK to confirm write success)
+        log("starting to listen for UpdateAcks, acks: "+ acks.size()+" quorum: "+ quorum());
         if (acks.size() >= quorum()) {
             broadcastWriteOk(update);
             pendingAcks.remove(k);
@@ -419,11 +420,11 @@ public class Replica extends AbstractReplica {
             }
         }
 
-        tell(new Ack(msg.epoch, msg.seqNum), getSender());
+        tell(new UpdateAck(msg.epoch, msg.seqNum), getSender());
         checkAndApplyCrash(Crash.Type.Update);
     }
 
-    private void onAck(Ack msg) {
+    private void onUpdateAck(UpdateAck msg) {
         if (id != coordinatorId) return;
         long k = key(msg.epoch, msg.seqNum);
         Set<Integer> acks = pendingAcks.get(k);
@@ -431,6 +432,7 @@ public class Replica extends AbstractReplica {
         int senderId = senderIdOf(getSender());
         if (senderId < 0) return;
         acks.add(senderId);
+        log("received UpdateAck, acks:"+ acks.size()+" quorum: "+ quorum());
         if (acks.size() >= quorum()) {
             Update u = pendingUpdates.get(k);
             if (u != null) {
@@ -441,6 +443,7 @@ public class Replica extends AbstractReplica {
     }
 
     private void broadcastWriteOk(Update update) {
+        log("broadcasting WriteOk");
         broadcastToOthers(new WriteOk(update.epoch, update.seqNum));
         applyUpdate(update); // coordinator commits to itself as well (it does not send itself a WriteOk)
     }
@@ -609,7 +612,7 @@ public class Replica extends AbstractReplica {
         int selfIdx = ids.indexOf(id);
         for (int step = 1; step <= n; step++) {
             int cand = ids.get((selfIdx + step) % n);
-            if (cand == id) continue;
+            // if (cand == id) continue;
             if (electionSkipped.contains(cand)) continue;
             return cand;
         }
