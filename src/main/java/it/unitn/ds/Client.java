@@ -86,13 +86,13 @@ public class Client extends AbstractClient {
     }
 
     private void onReadResponse(Replica.ReadResponse msg) {
-        log("READ complete (true, " + msg.index + ", " + msg.value + ") from Replica_" + msg.replicaId);
+        //log("READ complete (true, " + msg.index + ", " + msg.value + ") from Replica_" + msg.replicaId);
         cancel(pendingReadTimers.remove(msg.index));
         callbackOnReadResult(new ReadResult(true, msg.index, msg.value, msg.replicaId));
     }
 
     private void onWriteResponse(Replica.WriteResponse msg) {
-        log("WRITE complete (" + msg.success + ", " + msg.index + ", " + msg.value + ") from Replica_" + msg.replicaId);
+        //log("WRITE complete (" + msg.success + ", " + msg.index + ", " + msg.value + ") from Replica_" + msg.replicaId);
         cancel(pendingWriteTimers.remove(msg.index));
         pendingWriteValues.remove(msg.index);
         callbackOnWriteResult(new WriteResult(msg.success, msg.index, msg.value, msg.replicaId));
