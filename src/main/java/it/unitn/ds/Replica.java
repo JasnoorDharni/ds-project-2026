@@ -851,9 +851,8 @@ public class Replica extends AbstractReplica {
 
     private void armForwardTimer(long fId) {
         cancel(forwardTimers.get(fId));
-        // max latency forward + max latency update = 2x. using 4x to avoid false positives
         Cancellable c = getContext().system().scheduler().scheduleOnce(
-                Duration.create(getMaxLatencyPlusTolerance() * 4L, TimeUnit.MILLISECONDS),
+                Duration.create(getMaxLatencyPlusTolerance() * 3L, TimeUnit.MILLISECONDS),
                 getSelf(),
                 new ForwardWriteTimeoutMsg(fId),
                 getContext().system().dispatcher(),
