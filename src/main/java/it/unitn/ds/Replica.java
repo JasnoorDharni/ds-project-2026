@@ -474,7 +474,6 @@ public class Replica extends AbstractReplica {
                 }
             }
         }
-        checkAndApplyCrash(Crash.Type.Update);
     }
 
     // =========================================================================
@@ -521,7 +520,7 @@ public class Replica extends AbstractReplica {
     private void onHeartbeat(Heartbeat msg) {
         if (id == coordinatorId) return;
         scheduleHeartbeatTimeout();
-        checkAndApplyCrash(Crash.Type.Update);
+        checkAndApplyCrash(Crash.Type.Heartbeat);
     }
 
     private void onHeartbeatTimeout(HeartbeatTimeout msg) {
@@ -558,7 +557,7 @@ public class Replica extends AbstractReplica {
     // replicas that notice coordinator crash through heartbeats will pass delay = id*getMaxLatencyPlusTolerance, replicas that notice through write attemps will pass 0
     private void armStaggeredElectionStartTimeout(int crashedCoordId, long delay){
         cancel(staggeredElectionStartSchedule);
-        electionAckTimeoutSchedule = getContext().system().scheduler().scheduleOnce(
+        staggeredElectionStartSchedule = getContext().system().scheduler().scheduleOnce(
                 Duration.create(delay, TimeUnit.MILLISECONDS),
                 getSelf(),
                 new StaggeredElectionStartTimeout(crashedCoordId),
@@ -653,7 +652,7 @@ public class Replica extends AbstractReplica {
             currentElection = new Election(newEntries, msg.crashedCoordId);
             forwardElection();
         }
-        checkAndApplyCrash(Crash.Type.Update);
+        checkAndApplyCrash(Crash.Type.Election);
     }
 
     // Priority: highest epoch → highest seqNum → highest id (tiebreaker)
@@ -781,6 +780,10 @@ public class Replica extends AbstractReplica {
         inElection = false;
         cancel(electionAckTimeoutSchedule);
         cancel(electionTerminationTimeoutSchedule);
+        for (Cancellable c : forwardTimers.values()) cancel(c);
+            forwardTimers.clear();
+        for (Cancellable c : updateTimers.values()) cancel(c);
+            updateTimers.clear();
         // Catch-up: route every missed update through applyUpdate so that
         //  - WriteResponse is sent to the client if this replica was the origin
         //    (otherwise the client would time out for an actually-committed write)
@@ -820,7 +823,7 @@ public class Replica extends AbstractReplica {
     }
 
     // Called at the top of every handler that has a crash point.
-    // Returns true (and crashes) BEFORE the message is processed, so the Nth message is never handled.
+    // crashes start exactly after the nth message has been handled
     private boolean checkAndApplyCrash(Crash.Type type) {
         if (pendingCrashType == type) {
             pendingCrashCount--;
