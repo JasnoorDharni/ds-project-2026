@@ -539,7 +539,7 @@ public class Replica extends AbstractReplica {
     // replicas that notice coordinator crash through heartbeats will pass delay = id*getMaxLatencyPlusTolerance, replicas that notice through write attemps will pass 0
     private void armStaggeredElectionStartTimeout(int crashedCoordId, long delay){
         cancel(staggeredElectionStartSchedule);
-        electionAckTimeoutSchedule = getContext().system().scheduler().scheduleOnce(
+        staggeredElectionStartSchedule = getContext().system().scheduler().scheduleOnce(
                 Duration.create(delay, TimeUnit.MILLISECONDS),
                 getSelf(),
                 new StaggeredElectionStartTimeout(crashedCoordId),
