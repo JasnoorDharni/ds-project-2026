@@ -321,6 +321,28 @@ public class Replica extends AbstractReplica {
                 .build();
     }
 
+    private Receive electionReceive() {
+        return createBaseReceiveBuilder()
+                .match(ReadRequest.class, this::onReadRequest)
+                .match(WriteRequest.class, this::onWriteRequest)
+                .match(ForwardWrite.class, this::onForwardWrite)
+                .match(Update.class, this::onUpdate)
+                .match(Ack.class, this::onAck)
+                .match(WriteOk.class, this::onWriteOk)
+                .match(Heartbeat.class, x -> {})
+                .match(BroadcastHeartbeat.class, x -> {})
+                .match(HeartbeatTimeout.class, x -> {} )
+                .match(Election.class, this::onElection)
+                .match(ElectionAck.class, this::onElectionAck)
+                .match(ElectionAckTimeout.class, this::onElectionAckTimeout)
+                .match(ElectionTerminationTimeout.class, this::onElectionTerminationTimeout)
+                .match(Synchronization.class, this::onSynchronization)
+                .match(ForwardWriteTimeoutMsg.class, x -> {})
+                .match(PendingWriteOkTimeoutMsg.class, x -> {})
+                .match(StaggeredElectionStartTimeout.class, this::onStaggeredElectionStartTimeout)
+                .build();
+    }
+
     private Receive crashedReceive() {
     return receiveBuilder()
             .matchAny(msg -> { })
@@ -500,7 +522,6 @@ public class Replica extends AbstractReplica {
     }
 
     private void onHeartbeatTimeout(HeartbeatTimeout msg) {
-        if (inElection) return;
         if (id == coordinatorId) return;
         log("Heartbeat timeout. Assuming coordinator " + coordinatorId + " crashed.");
         armStaggeredElectionStartTimeout(coordinatorId,id * getMaxLatencyPlusTolerance());
@@ -512,7 +533,6 @@ public class Replica extends AbstractReplica {
     // =========================================================================
 
     private void onForwardWriteTimeout(ForwardWriteTimeoutMsg msg) {
-        if (inElection) return;
         if (forwardTimers.remove(msg.forwardId) != null) {
             log("Timeout waiting for UPDATE after ForwardWrite. Assuming coordinator crash.");
             armStaggeredElectionStartTimeout(coordinatorId,0);
@@ -520,7 +540,6 @@ public class Replica extends AbstractReplica {
     }
 
     private void onPendingWriteOkTimeout(PendingWriteOkTimeoutMsg msg) {
-        if (inElection) return;
         long k = key(msg.epoch, msg.seqNum);
         if (updateTimers.remove(k) != null) {
             log("Timeout waiting for WRITEOK. Assuming coordinator crash.");
