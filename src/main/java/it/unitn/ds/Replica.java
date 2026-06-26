@@ -483,6 +483,7 @@ public class Replica extends AbstractReplica {
         log("broadcasting WriteOk");
         broadcastToOthers(new WriteOk(update.epoch, update.seqNum));
         applyUpdate(update); // coordinator commits to itself as well (it does not send itself a WriteOk)
+        checkAndApplyCrash(Crash.Type.WriteOK);   
     }
 
     private void onWriteOk(WriteOk msg) {
@@ -491,6 +492,7 @@ public class Replica extends AbstractReplica {
         if (u == null) return;
         if (historyContains(u.epoch, u.seqNum)) return; // already committed via SYNCHRONIZATION; skip
         applyUpdate(u);
+        checkAndApplyCrash(Crash.Type.WriteOK);   
     }
 
     private void applyUpdate(Update u) {
