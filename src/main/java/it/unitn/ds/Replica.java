@@ -166,7 +166,7 @@ public class Replica extends AbstractReplica {
 
     // fired when an election has been running too long without producing a
     // SYNCHRONIZATION; covers the case where the elected winner crashes before broadcasting SYNC.
-    private static class ElectionTermination implements Serializable {}
+    private static class ElectionTimeout implements Serializable {}
 
     // fired if UPDATE not received after sending ForwardWrite
     private static class ForwardWriteTimeout implements Serializable {
@@ -221,21 +221,28 @@ public class Replica extends AbstractReplica {
     private Crash.Type pendingCrashType = null;
     private int pendingCrashCount = 0;
 
-    private Cancellable heartbeatSchedule;
-    private Cancellable heartbeatTimeoutSchedule;
-    private Cancellable electionAckTimeoutSchedule;
-    private Cancellable electionTerminationTimeoutSchedule;
-    private Cancellable staggeredElectionStartSchedule;
 
     private long nextForwardId = 0;
-    private final Map<Long, Cancellable> forwardTimers = new HashMap<>();
-    private final Map<Long, Cancellable> updateTimers = new HashMap<>();
 
     private Election currentElection;
     // Crashed coordinator plus any ring-hop targets that timed out in the current election round.
     private final Set<Integer> electionSkipped = new HashSet<>();
     // tracks the last replica that was forwarded an election message (not necessarily the successor due to crashes)
     private int electionCurrentTarget = -1; 
+
+    // =========================================================================
+    // State > 
+    // =========================================================================
+
+    private Cancellable heartbeatTimer;
+    private Cancellable heartbeatTimeoutTimer;
+    private Cancellable electionAckTimeoutTimer;
+    private Cancellable electionTimeoutTimer;
+    private Cancellable staggeredElectionStartTimer;
+
+    private final Map<Long, Cancellable> forwardTimeoutTimers = new HashMap<>();
+    private final Map<Long, Cancellable> updateTimeoutTimers = new HashMap<>();
+
 
     // =========================================================================
     // Constructors / Props
@@ -314,7 +321,7 @@ public class Replica extends AbstractReplica {
                 } )
                 .match(ElectionAck.class, x -> {})
                 .match(ElectionAckTimeout.class, x -> {})
-                .match(ElectionTermination.class, x -> {})
+                .match(ElectionTimeout.class, x -> {})
                 .match(Synchronization.class, x -> {})
                 .match(ForwardWriteTimeout.class, this::onForwardWriteTimeout)
                 .match(PendingWriteOkTimeout.class, this::onPendingWriteOkTimeout)
@@ -338,7 +345,7 @@ public class Replica extends AbstractReplica {
                 .match(Election.class, this::onElection)
                 .match(ElectionAck.class, this::onElectionAck)
                 .match(ElectionAckTimeout.class, this::onElectionAckTimeout)
-                .match(ElectionTermination.class, this::onElectionTerminationTimeout)
+                .match(ElectionTimeout.class, this::onElectionTerminationTimeout)
                 .match(Synchronization.class, this::onSynchronization)
                 .match(ForwardWriteTimeout.class, x -> {})
                 .match(PendingWriteOkTimeout.class, x -> {})
@@ -365,12 +372,12 @@ public class Replica extends AbstractReplica {
         electionSkipped.add(crashedCoordId);
 
         // cancel non election-related timers even though their messages are ignored by the receiver
-        cancel(heartbeatSchedule);
-        cancel(heartbeatTimeoutSchedule);
-        for (Cancellable c : forwardTimers.values()) cancel(c);
-        forwardTimers.clear();
-        for (Cancellable c : updateTimers.values()) cancel(c);
-        updateTimers.clear();
+        cancel(heartbeatTimer);
+        cancel(heartbeatTimeoutTimer);
+        for (Cancellable c : forwardTimeoutTimers.values()) cancel(c);
+        forwardTimeoutTimers.clear();
+        for (Cancellable c : updateTimeoutTimers.values()) cancel(c);
+        updateTimeoutTimers.clear();
     }
 
     private void switchToStandardState(int newCoordinatorId, int newEpoch){
@@ -380,12 +387,12 @@ public class Replica extends AbstractReplica {
         coordinatorId = newCoordinatorId;
 
         // cancel election-related timers
-        cancel(electionAckTimeoutSchedule);
-        cancel(electionTerminationTimeoutSchedule);
-        for (Cancellable c : forwardTimers.values()) cancel(c);
-        forwardTimers.clear();
-        for (Cancellable c : updateTimers.values()) cancel(c);
-        updateTimers.clear();
+        cancel(electionAckTimeoutTimer);
+        cancel(electionTimeoutTimer);
+        for (Cancellable c : forwardTimeoutTimers.values()) cancel(c);
+        forwardTimeoutTimers.clear();
+        for (Cancellable c : updateTimeoutTimers.values()) cancel(c);
+        updateTimeoutTimers.clear();
     }
 
     // =========================================================================
@@ -440,20 +447,20 @@ public class Replica extends AbstractReplica {
         }
 
         if (id != coordinatorId) {
-            cancel(updateTimers.get(k));
+            cancel(updateTimeoutTimers.get(k));
             Cancellable c = getContext().system().scheduler().scheduleOnce(
                     Duration.create(getMaxLatencyPlusTolerance() * 4L, TimeUnit.MILLISECONDS),
                     getSelf(),
                     new PendingWriteOkTimeout(msg.epoch, msg.seqNum),
                     getContext().system().dispatcher(),
                     getSelf());
-            updateTimers.put(k, c);
+            updateTimeoutTimers.put(k, c);
         }
 
         if (msg.originReplica.equals(getSelf())) {
             for (PendingForward pf : pendingForwards) {
                 if (pf.index == msg.index && pf.value == msg.value && pf.client.equals(msg.originClient)) {
-                    cancel(forwardTimers.remove(pf.id));
+                    cancel(forwardTimeoutTimers.remove(pf.id));
                     break;
                 }
             }
@@ -498,7 +505,7 @@ public class Replica extends AbstractReplica {
     }
 
     private void applyUpdate(Update u) {
-        cancel(updateTimers.remove(key(u.epoch, u.seqNum)));
+        cancel(updateTimeoutTimers.remove(key(u.epoch, u.seqNum)));
         positions[u.index] = u.value;
         updateHistory.add(u);
         pendingUpdates.remove(key(u.epoch, u.seqNum));
@@ -508,7 +515,7 @@ public class Replica extends AbstractReplica {
             for (int i = 0; i < pendingForwards.size(); i++) {
                 PendingForward pf = pendingForwards.get(i);
                 if (pf.index == u.index && pf.value == u.value && pf.client.equals(u.originClient)) {
-                    cancel(forwardTimers.remove(pf.id));
+                    cancel(forwardTimeoutTimers.remove(pf.id));
                     pendingForwards.remove(i);
                     break;
                 }
@@ -527,8 +534,8 @@ public class Replica extends AbstractReplica {
     }
 
     private void scheduleNextHeartbeat() {
-        cancel(heartbeatSchedule);
-        heartbeatSchedule = getContext().system().scheduler().scheduleOnce(
+        cancel(heartbeatTimer);
+        heartbeatTimer = getContext().system().scheduler().scheduleOnce(
                 Duration.create(getCoordinatorBeatInterval(), TimeUnit.MILLISECONDS),
                 getSelf(),
                 new BroadcastHeartbeat(),
@@ -547,9 +554,9 @@ public class Replica extends AbstractReplica {
     // =========================================================================
 
     private void scheduleHeartbeatTimeout() {
-        cancel(heartbeatTimeoutSchedule);
+        cancel(heartbeatTimeoutTimer);
         // 2× beat interval: one full interval for the coordinator to send + one for max network latency
-        heartbeatTimeoutSchedule = getContext().system().scheduler().scheduleOnce(
+        heartbeatTimeoutTimer = getContext().system().scheduler().scheduleOnce(
                 Duration.create(getCoordinatorBeatInterval() * 2L, TimeUnit.MILLISECONDS),
                 getSelf(),
                 new HeartbeatTimeout(),
@@ -577,7 +584,7 @@ public class Replica extends AbstractReplica {
     // this and the next timeout instantly start election instead of using the staggered approach,
     // as this timeout happens to individual replicas and not all at once like with the heartbeat
     private void onForwardWriteTimeout(ForwardWriteTimeout msg) {
-        if (forwardTimers.remove(msg.forwardId) != null) {
+        if (forwardTimeoutTimers.remove(msg.forwardId) != null) {
             log("Timeout waiting for UPDATE after ForwardWrite. Assuming coordinator crash.");
             startElection(coordinatorId);
         }
@@ -585,7 +592,7 @@ public class Replica extends AbstractReplica {
 
     private void onPendingWriteOkTimeout(PendingWriteOkTimeout msg) {
         long k = key(msg.epoch, msg.seqNum);
-        if (updateTimers.remove(k) != null) {
+        if (updateTimeoutTimers.remove(k) != null) {
             log("Timeout waiting for WRITEOK. Assuming coordinator crash.");
             startElection(coordinatorId);
         }
@@ -597,9 +604,9 @@ public class Replica extends AbstractReplica {
     // =========================================================================
 
     private void armStaggeredElectionStartTimeout(int crashedCoordId){
-        cancel(staggeredElectionStartSchedule);
+        cancel(staggeredElectionStartTimer);
         long delay = id * getMaxLatencyPlusTolerance();
-        staggeredElectionStartSchedule = getContext().system().scheduler().scheduleOnce(
+        staggeredElectionStartTimer = getContext().system().scheduler().scheduleOnce(
                 Duration.create(delay, TimeUnit.MILLISECONDS),
                 getSelf(),
                 new StaggeredElectionStartTimeout(crashedCoordId),
@@ -659,7 +666,7 @@ public class Replica extends AbstractReplica {
 
     private void onElection(Election msg) {
         // avoid starting another election while still forwarding the current one
-        cancel(staggeredElectionStartSchedule);
+        cancel(staggeredElectionStartTimer);
 
         tell(new ElectionAck(id), getSender());
 
@@ -704,7 +711,7 @@ public class Replica extends AbstractReplica {
         // ignore late ACKs from hops already skipped: they would otherwise cancel
         // the timeout armed for the new (current) target and stall the election
         if (msg.replicaId != electionCurrentTarget) return;
-        cancel(electionAckTimeoutSchedule);
+        cancel(electionAckTimeoutTimer);
     }
 
     // =========================================================================
@@ -719,7 +726,7 @@ public class Replica extends AbstractReplica {
         forwardElection();
     }
 
-    private void onElectionTerminationTimeout(ElectionTermination msg) {
+    private void onElectionTerminationTimeout(ElectionTimeout msg) {
         // Election stalled (winner likely crashed before sending SYNC); restart.
         log("Election termination timeout. Election stalled, restarting...");
         armStaggeredElectionStartTimeout(coordinatorId);
@@ -732,7 +739,7 @@ public class Replica extends AbstractReplica {
     // Arms a fallback timer that restarts the election if SYNCHRONIZATION never arrives.
     // Covers the case where the elected winner crashes before broadcasting SYNC (Hint 2).
     private void armElectionTerminationTimeout() {
-        cancel(electionTerminationTimeoutSchedule);
+        cancel(electionTimeoutTimer);
         // time for the election to succesfully travel the entire ring 
         long loopTime = (long) getSystemNumberOfActors() * getMaxLatencyPlusTolerance();
         // time to detect a crashed node in the ring
@@ -744,17 +751,17 @@ public class Replica extends AbstractReplica {
 
         long delay = (loopTime + crashDetectTime *maxCrashes + synchronizationTime)*2; 
 
-        electionTerminationTimeoutSchedule = getContext().system().scheduler().scheduleOnce(
+        electionTimeoutTimer = getContext().system().scheduler().scheduleOnce(
                 Duration.create(delay, TimeUnit.MILLISECONDS),
                 getSelf(),
-                new ElectionTermination(),
+                new ElectionTimeout(),
                 getContext().dispatcher(),
                 getSelf());
     }
 
     private void armElectionAckTimeout(int target){
-        cancel(electionAckTimeoutSchedule);
-        electionAckTimeoutSchedule = getContext().system().scheduler().scheduleOnce(
+        cancel(electionAckTimeoutTimer);
+        electionAckTimeoutTimer = getContext().system().scheduler().scheduleOnce(
                 // expect max delay is maxlatency * 2, using *3 adds the required margin
                 Duration.create(getMaxLatencyPlusTolerance() * 3L, TimeUnit.MILLISECONDS),
                 getSelf(),
@@ -822,14 +829,14 @@ public class Replica extends AbstractReplica {
 
     private void applyCrashNow() {
         // timer messages would not be handled anyway but we still cancel them
-        cancel(heartbeatSchedule);
-        cancel(heartbeatTimeoutSchedule);
-        cancel(electionAckTimeoutSchedule);
-        cancel(electionTerminationTimeoutSchedule);
-        for (Cancellable c : forwardTimers.values()) cancel(c);
-        forwardTimers.clear();
-        for (Cancellable c : updateTimers.values()) cancel(c);
-        updateTimers.clear();
+        cancel(heartbeatTimer);
+        cancel(heartbeatTimeoutTimer);
+        cancel(electionAckTimeoutTimer);
+        cancel(electionTimeoutTimer);
+        for (Cancellable c : forwardTimeoutTimers.values()) cancel(c);
+        forwardTimeoutTimers.clear();
+        for (Cancellable c : updateTimeoutTimers.values()) cancel(c);
+        updateTimeoutTimers.clear();
         log("CRASHED");
         getContext().become(crashedReceive());
     }
@@ -906,13 +913,13 @@ public class Replica extends AbstractReplica {
     }
 
     private void armForwardTimer(long fId) {
-        cancel(forwardTimers.get(fId));
+        cancel(forwardTimeoutTimers.get(fId));
         Cancellable c = getContext().system().scheduler().scheduleOnce(
                 Duration.create(getMaxLatencyPlusTolerance() * 3L, TimeUnit.MILLISECONDS),
                 getSelf(),
                 new ForwardWriteTimeout(fId),
                 getContext().system().dispatcher(),
                 getSelf());
-        forwardTimers.put(fId, c);
+        forwardTimeoutTimers.put(fId, c);
     }
 }
