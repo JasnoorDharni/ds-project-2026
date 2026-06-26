@@ -53,11 +53,6 @@ gradle-app.setting
 # # Work around https://youtrack.jetbrains.com/issue/IDEA-116898
 # gradle/wrapper/gradle-wrapper.properties
 
-# Project-specific exclusions
-CLAUDE.md
-*.pdf
-lab_material/
-
 # direnv exclusions
 .direnv/
 .envrc
