@@ -314,10 +314,10 @@ public class Replica extends AbstractReplica {
                 } )
                 .match(ElectionAck.class, x -> {})
                 .match(ElectionAckTimeout.class, x -> {})
-                .match(ElectionTerminationTimeout.class, x -> {})
+                .match(ElectionTermination.class, x -> {})
                 .match(Synchronization.class, x -> {})
-                .match(ForwardWriteTimeoutMsg.class, this::onForwardWriteTimeout)
-                .match(PendingWriteOkTimeoutMsg.class, this::onPendingWriteOkTimeout)
+                .match(ForwardWriteTimeout.class, this::onForwardWriteTimeout)
+                .match(PendingWriteOkTimeout.class, this::onPendingWriteOkTimeout)
                 .match(StaggeredElectionStartTimeout.class, this::onStaggeredElectionStartTimeout)
                 .build();
     }
@@ -327,19 +327,21 @@ public class Replica extends AbstractReplica {
                 .match(ReadRequest.class, this::onReadRequest)
                 .match(WriteRequest.class, this::onWriteRequest)
                 .match(ForwardWrite.class, this::onForwardWrite)
-                .match(Update.class, this::onUpdate)
-                .match(UpdateAck.class, this::onUpdateAck)
-                .match(WriteOk.class, x -> {}) // Hint 1: avoid applying updates during an election
+                // Hint 1: avoid applying updates during an election: all update related messages are suspended
+                .match(Update.class, x -> {})
+                .match(UpdateAck.class, x -> {})
+                .match(WriteOk.class, x -> {}) 
+                // heartbeats are suspended too during election
                 .match(Heartbeat.class, x -> {})
                 .match(BroadcastHeartbeat.class, x -> {})
                 .match(HeartbeatTimeout.class, x -> {} )
                 .match(Election.class, this::onElection)
                 .match(ElectionAck.class, this::onElectionAck)
                 .match(ElectionAckTimeout.class, this::onElectionAckTimeout)
-                .match(ElectionTerminationTimeout.class, this::onElectionTerminationTimeout)
+                .match(ElectionTermination.class, this::onElectionTerminationTimeout)
                 .match(Synchronization.class, this::onSynchronization)
-                .match(ForwardWriteTimeoutMsg.class, x -> {})
-                .match(PendingWriteOkTimeoutMsg.class, x -> {})
+                .match(ForwardWriteTimeout.class, x -> {})
+                .match(PendingWriteOkTimeout.class, x -> {})
                 .match(StaggeredElectionStartTimeout.class, this::onStaggeredElectionStartTimeout)
                 .build();
     }
@@ -442,7 +444,7 @@ public class Replica extends AbstractReplica {
             Cancellable c = getContext().system().scheduler().scheduleOnce(
                     Duration.create(getMaxLatencyPlusTolerance() * 4L, TimeUnit.MILLISECONDS),
                     getSelf(),
-                    new PendingWriteOkTimeoutMsg(msg.epoch, msg.seqNum),
+                    new PendingWriteOkTimeout(msg.epoch, msg.seqNum),
                     getContext().system().dispatcher(),
                     getSelf());
             updateTimers.put(k, c);
@@ -574,14 +576,14 @@ public class Replica extends AbstractReplica {
 
     // this and the next timeout instantly start election instead of using the staggered approach,
     // as this timeout happens to individual replicas and not all at once like with the heartbeat
-    private void onForwardWriteTimeout(ForwardWriteTimeoutMsg msg) {
+    private void onForwardWriteTimeout(ForwardWriteTimeout msg) {
         if (forwardTimers.remove(msg.forwardId) != null) {
             log("Timeout waiting for UPDATE after ForwardWrite. Assuming coordinator crash.");
             startElection(coordinatorId);
         }
     }
 
-    private void onPendingWriteOkTimeout(PendingWriteOkTimeoutMsg msg) {
+    private void onPendingWriteOkTimeout(PendingWriteOkTimeout msg) {
         long k = key(msg.epoch, msg.seqNum);
         if (updateTimers.remove(k) != null) {
             log("Timeout waiting for WRITEOK. Assuming coordinator crash.");
@@ -717,7 +719,7 @@ public class Replica extends AbstractReplica {
         forwardElection();
     }
 
-    private void onElectionTerminationTimeout(ElectionTerminationTimeout msg) {
+    private void onElectionTerminationTimeout(ElectionTermination msg) {
         // Election stalled (winner likely crashed before sending SYNC); restart.
         log("Election termination timeout. Election stalled, restarting...");
         armStaggeredElectionStartTimeout(coordinatorId);
@@ -745,7 +747,7 @@ public class Replica extends AbstractReplica {
         electionTerminationTimeoutSchedule = getContext().system().scheduler().scheduleOnce(
                 Duration.create(delay, TimeUnit.MILLISECONDS),
                 getSelf(),
-                new ElectionTerminationTimeout(),
+                new ElectionTermination(),
                 getContext().dispatcher(),
                 getSelf());
     }
@@ -912,7 +914,7 @@ public class Replica extends AbstractReplica {
         Cancellable c = getContext().system().scheduler().scheduleOnce(
                 Duration.create(getMaxLatencyPlusTolerance() * 3L, TimeUnit.MILLISECONDS),
                 getSelf(),
-                new ForwardWriteTimeoutMsg(fId),
+                new ForwardWriteTimeout(fId),
                 getContext().system().dispatcher(),
                 getSelf());
         forwardTimers.put(fId, c);
