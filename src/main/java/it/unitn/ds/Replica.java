@@ -111,7 +111,7 @@ public class Replica extends AbstractReplica {
     // Self-message fired when no heartbeat has arrived within the deadline; initiates election.
     private static class HeartbeatTimeout implements Serializable {}
 
-    // One replica's vote record in the ELECTION ring message: the last (epoch, seqNum) it committed.
+    // One replica's vote record in the ELECTION ring message: the last (epoch, seqNum) it has seen.
     public static class ElectionEntry implements Serializable {
         public final int replicaId;
         public final int epoch;
@@ -868,10 +868,6 @@ public class Replica extends AbstractReplica {
             if (e.getKey() != id) tell(msg, e.getValue());
         }
     }
-
-    // private Update lastUpdate() {
-    //     return updateHistory.isEmpty() ? null : updateHistory.get(updateHistory.size() - 1);
-    // }
 
     // compute the last known update, considers both commited updates and pending ones
     private Update lastUpdate() {
