@@ -166,23 +166,23 @@ public class Replica extends AbstractReplica {
 
     // fired when an election has been running too long without producing a
     // SYNCHRONIZATION; covers the case where the elected winner crashes before broadcasting SYNC.
-    private static class ElectionTerminationTimeout implements Serializable {}
+    private static class ElectionTermination implements Serializable {}
 
     // fired if UPDATE not received after sending ForwardWrite
-    private static class ForwardWriteTimeoutMsg implements Serializable {
+    private static class ForwardWriteTimeout implements Serializable {
         public final long forwardId;
-        public ForwardWriteTimeoutMsg(long forwardId) { this.forwardId = forwardId; }
+        public ForwardWriteTimeout(long forwardId) { this.forwardId = forwardId; }
     }
 
     // fired if WRITEOK not received in time after sending Ack
-    private static class PendingWriteOkTimeoutMsg implements Serializable {
+    private static class PendingWriteOkTimeout implements Serializable {
         public final int epoch;
         public final int seqNum;
-        public PendingWriteOkTimeoutMsg(int epoch, int seqNum) { this.epoch = epoch; this.seqNum = seqNum; }
+        public PendingWriteOkTimeout(int epoch, int seqNum) { this.epoch = epoch; this.seqNum = seqNum; }
     }
 
     // fired after delay from staggeredElectionStartSchedule
-    public static class StaggeredElectionStartTimeout {
+    public static class StaggeredElectionStartTimeout implements Serializable {
         public final int crashedCoordId;
         public StaggeredElectionStartTimeout(int crashedCoordId) {
             this.crashedCoordId = crashedCoordId;
